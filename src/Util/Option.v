@@ -4,22 +4,72 @@ Require Import Crypto.Util.Tactics.BreakMatch.
 Require Import Crypto.Util.Tactics.DestructHead.
 Require Import Crypto.Util.Notations.
 
+Scheme Equality for option.
+Arguments option_beq {_} _ _ _.
+
+Definition option_beq_hetero {A B} (AB_beq : A -> B -> bool) (x : option A) (y : option B) : bool
+  := match x, y with
+     | Some x, Some y => AB_beq x y
+     | None, None => true
+     | Some _, _
+     | None, _
+       => false
+     end.
+
+(** In general, [lift : M (option A) -> option (M A)].  This is a bit
+    confusing for [option] because [M = option].  We want to return
+    [None] if the thing contained in the [M (option A)] is [None], and
+    say [Some] otherwise. *)
+Definition lift {A} (x : option (option A)) : option (option A)
+  := match x with
+     | Some None => None (* the contained thing is bad/not present *)
+     | Some (Some x) => Some (Some x)
+     | None => Some None
+     end.
+
+Notation map := option_map (only parsing). (* so we have [Option.map] *)
+
 Definition bind {A B} (v : option A) (f : A -> option B) : option B
   := match v with
      | Some v => f v
      | None => None
      end.
 
+Definition sequence {A} (v1 v2 : option A) : option A
+  := match v1 with
+     | Some v => Some v
+     | None => v2
+     end.
+Definition sequence_return {A} (v1 : option A) (v2 : A) : A
+  := match v1 with
+     | Some v => v
+     | None => v2
+     end.
+Global Arguments sequence {A} !v1 v2.
+Global Arguments sequence_return {A} !v1 v2.
+Notation or_else := sequence (only parsing).
+(* After OCaml's [value] *)
+Notation value := sequence_return (only parsing).
+Notation get_default := sequence_return (only parsing).
+
 Module Export Notations.
   Delimit Scope option_scope with option.
   Bind Scope option_scope with option.
 
   Notation "A <- X ; B" := (bind X (fun A => B%option)) : option_scope.
+  Infix ";;" := sequence : option_scope.
+  Infix ";;;" := sequence_return : option_scope.
 End Notations.
 Local Open Scope option_scope.
 
+Definition combine {A B} (x : option A) (y : option B) : option (A * B)
+  := match x, y with
+     | Some x, Some y => Some (x, y)
+     | _, _ => None
+     end.
+
 Section Relations.
-  Definition option_eq {A} eq (x y : option A) :=
+  Definition option_eq {A B} eq (x : option A) (y : option B) :=
     match x with
     | None    => y = None
     | Some ax => match y with
@@ -32,20 +82,73 @@ Section Relations.
     cbv; repeat (break_match || intro || intuition congruence ||
                  solve [ apply reflexivity
                        | apply symmetry; eassumption
-                       | eapply transitivity; eassumption ] ).
+                       | eapply transitivity; eassumption
+                       | eauto ] ).
 
   Global Instance Reflexive_option_eq {T} {R} {Reflexive_R:@Reflexive T R}
-    : Reflexive (option_eq R). Proof. t. Qed.
+    : Reflexive (option_eq R) | 1. Proof. t. Qed.
+
+  Lemma option_eq_sym {A B} {R1 R2 : _ -> _ -> Prop} (HR : forall v1 v2, R1 v1 v2 -> R2 v2 v1)
+    : forall v1 v2, @option_eq A B R1 v1 v2 -> option_eq R2 v2 v1.
+  Proof. t. Qed.
+
+  Lemma option_eq_trans {A B C} {R1 R2 R3 : _ -> _ -> Prop}
+        (HR : forall v1 v2 v3, R1 v1 v2 -> R2 v2 v3 -> R3 v1 v3)
+    : forall v1 v2 v3, @option_eq A B R1 v1 v2 -> @option_eq B C R2 v2 v3 -> @option_eq A C R3 v1 v3.
+  Proof. t. Qed.
 
   Global Instance Transitive_option_eq {T} {R} {Transitive_R:@Transitive T R}
-    : Transitive (option_eq R). Proof. t. Qed.
+    : Transitive (option_eq R) | 1 := option_eq_trans Transitive_R.
 
   Global Instance Symmetric_option_eq {T} {R} {Symmetric_R:@Symmetric T R}
-    : Symmetric (option_eq R). Proof. t. Qed.
+    : Symmetric (option_eq R) | 1 := option_eq_sym Symmetric_R.
 
   Global Instance Equivalence_option_eq {T} {R} {Equivalence_R:@Equivalence T R}
     : Equivalence (option_eq R). Proof. split; exact _. Qed.
 End Relations.
+
+Lemma option_bl_hetero {A B} {AB_beq : A -> B -> bool} {AB_R : A -> B -> Prop}
+      (AB_bl : forall x y, AB_beq x y = true -> AB_R x y)
+      {x y}
+  : option_beq_hetero AB_beq x y = true -> option_eq AB_R x y.
+Proof using Type.
+  destruct x, y; cbn in *; eauto; congruence.
+Qed.
+
+Lemma option_lb_hetero {A B} {AB_beq : A -> B -> bool} {AB_R : A -> B -> Prop}
+      (AB_lb : forall x y, AB_R x y -> AB_beq x y = true)
+      {x y}
+  : option_eq AB_R x y -> option_beq_hetero AB_beq x y = true.
+Proof using Type.
+  destruct x, y; cbn in *; eauto; intuition congruence.
+Qed.
+
+Global Instance bind_Proper {A B}
+  : Proper (eq ==> (pointwise_relation _ eq) ==> eq) (@bind A B).
+Proof.
+  cbv [respectful bind pointwise_relation Proper]; intros; subst; break_innermost_match; auto.
+Qed.
+
+Global Instance bind_Proper_pointwise_option_eq {A B RB}
+  : Proper (eq ==> (pointwise_relation _ (option_eq RB)) ==> option_eq RB) (@bind A B) | 90.
+Proof.
+  cbv [respectful bind pointwise_relation Proper]; intros; subst; break_innermost_match; cbn [option_eq]; auto.
+Qed.
+
+Lemma bind_Proper_option_eq_hetero {A A' B B'} {RA RB : _ -> _ -> Prop}
+      a a' (HA : option_eq RA a a') b b' (HB : forall a a', RA a a' -> option_eq RB (b a) (b' a'))
+  : option_eq RB (@bind A B a b) (@bind A' B' a' b').
+Proof.
+  cbv [bind].
+  destruct a as [a|], a' as [a'|]; try (reflexivity || congruence || exfalso; assumption).
+  cbn [option_eq] in *; auto.
+Qed.
+
+Global Instance bind_Proper_option_eq {A B RA RB}
+  : Proper (option_eq RA ==> (RA ==> option_eq RB) ==> option_eq RB) (@bind A B) | 100.
+Proof.
+  cbv [Proper respectful]; eapply bind_Proper_option_eq_hetero.
+Qed.
 
 Global Instance Proper_option_rect_nd_changebody
       {A B:Type} {RB:relation B} {a:option A}
@@ -60,6 +163,13 @@ Global Instance Proper_option_rect_nd_changevalue
       {A B RA RB} some {Proper_some: Proper (RA==>RB) some}
   : Proper (RB ==> option_eq RA ==> RB) (@option_rect A (fun _ => B) some).
 Proof. cbv; repeat (intro || break_match || f_equiv || intuition congruence). Qed.
+
+Lemma bind_zero_l {A B} f : @bind A B None f = None.
+Proof. reflexivity. Qed.
+Lemma bind_zero_r {A B} v : @bind A B v (fun _ => None) = None.
+Proof. destruct v; reflexivity. Qed.
+Lemma bind_zero_r_ext {A B} v f : (forall v, f v = None) -> @bind A B v f = None.
+Proof. destruct v; cbn; auto. Qed.
 
 Lemma option_rect_false_returns_true_iff
       {T} {R} {reflexiveR:Reflexive R}

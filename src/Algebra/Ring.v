@@ -92,7 +92,7 @@ Section Ring.
     forall x y : T, not (eq (mul x y) zero) <-> (not (eq x zero) /\ not (eq y zero)).
   Proof using Type*. intros; rewrite zero_product_iff_zero_factor; tauto. Qed.
 
-  Global Instance Ncring_Ring_ops : @Ncring.Ring_ops T zero one add mul sub opp eq.
+  Global Instance Ncring_Ring_ops : @Ncring.Ring_ops T zero one add mul sub opp eq := {}.
   Global Instance Ncring_Ring : @Ncring.Ring T zero one add mul sub opp eq Ncring_Ring_ops.
   Proof using Type*.
     split; exact _ || cbv; intros; eauto using left_identity, right_identity, commutative, associative, right_inverse, left_distributive, right_distributive, ring_sub_definition with core typeclass_instances.
@@ -394,7 +394,7 @@ Section of_Z.
     intros a b.
     let x := match goal with |- ?x => x end in
     let f := match (eval pattern b in x) with ?f _ => f end in
-    apply (Z.peano_ind f); intros until 0; try intro IHb.
+    apply (Z.peano_ind f); intros *; try intro IHb.
     { rewrite !mul_0_r; reflexivity. }
     { rewrite Z.mul_succ_r, <-Z.add_1_r.
       rewrite of_Z_add, of_Z_add_1_r.

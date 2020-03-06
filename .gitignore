@@ -14,12 +14,17 @@ auto-save-list
 tramp
 .\#*
 
+# misc
+*.pyc
+
 # coq
 *.aux
 *.d
 *.glob
 *.vio
 *.vo
+*.vos
+*.vok
 CoqMakefile.conf
 Makefile.bak
 Makefile.coq
@@ -38,8 +43,14 @@ nra.cache
 .nra.cache
 
 /remake_curves.log
+/finished.ok
+/time-of-build-pretty.log
+/time-of-build.log
+
+/*.out
 
 # compilation outputs
+/*.o
 etc/tscfreq
 src/Specific/NISTP256/AMD64/feadd.c
 src/Specific/NISTP256/AMD64/feadd.h
@@ -101,3 +112,38 @@ third_party/openssl-nistz256-adx/measure
 third_party/openssl-nistz256-amd64/measure
 third_party/openssl-nistz256/measure
 third_party/curve25519-donna-c64/measure
+src/ExtractionHaskell/saturated_solinas
+src/ExtractionHaskell/unsaturated_solinas
+src/ExtractionHaskell/word_by_word_montgomery
+src/ExtractionHaskell/base_conversion
+src/ExtractionHaskell/saturated_solinas.exe
+src/ExtractionHaskell/unsaturated_solinas.exe
+src/ExtractionHaskell/word_by_word_montgomery.exe
+src/ExtractionHaskell/base_conversion.exe
+src/ExtractionHaskell/*.hi
+src/ExtractionHaskell/*.hs
+src/ExtractionHaskell/*.o
+src/ExtractionOCaml/saturated_solinas
+src/ExtractionOCaml/unsaturated_solinas
+src/ExtractionOCaml/word_by_word_montgomery
+src/ExtractionOCaml/base_conversion
+src/ExtractionOCaml/perf_unsaturated_solinas
+src/ExtractionOCaml/perf_word_by_word_montgomery
+src/ExtractionOCaml/saturated_solinas.exe
+src/ExtractionOCaml/unsaturated_solinas.exe
+src/ExtractionOCaml/word_by_word_montgomery.exe
+src/ExtractionOCaml/base_conversion.exe
+src/ExtractionOCaml/perf_unsaturated_solinas.exe
+src/ExtractionOCaml/perf_word_by_word_montgomery.exe
+src/ExtractionOCaml/*.cmi
+src/ExtractionOCaml/*.cmx
+src/ExtractionOCaml/*.ml
+src/ExtractionOCaml/*.o
+src/Rewriter/PerfTesting/Specific/generated/*.v
+src/Rewriter/PerfTesting/Specific/generated/*.log
+src/Rewriter/PerfTesting/Specific/generated/*.sh
+src/Rewriter/PerfTesting/Specific/generated/primes.mk
+
+# Rust
+/fiat-rust/Cargo.lock
+/fiat-rust/target/

@@ -8,7 +8,10 @@ Require Import Crypto.Util.NumTheoryUtil.
 Require Import Coq.Classes.Morphisms Coq.Setoids.Setoid.
 Require Import Coq.ZArith.BinInt Coq.NArith.BinNat Coq.ZArith.ZArith Coq.ZArith.Znumtheory Coq.NArith.NArith. (* import Zdiv before Znumtheory *)
 Require Import Coq.Logic.Eqdep_dec.
-Require Import Crypto.Util.NumTheoryUtil Crypto.Util.ZUtil.
+Require Import Crypto.Util.NumTheoryUtil.
+Require Import Crypto.Util.ZUtil.Odd.
+Require Import Crypto.Util.ZUtil.Modulo.
+Require Import Crypto.Util.ZUtil.Tactics.ZeroBounds.
 Require Import Crypto.Util.Tactics.SpecializeBy.
 Require Import Crypto.Util.Decidable.
 Require Export Crypto.Util.FixCoqMistakes.
@@ -95,7 +98,7 @@ Module F.
       destruct (Zle_lt_or_eq _ _ two_le_q) as [H|H]; [exact H|].
       rewrite <-H in q_3mod4; discriminate.
     Qed.
-    Local Hint Resolve two_lt_q_3mod4.
+    Local Hint Resolve two_lt_q_3mod4 : core.
 
     Lemma sqrt_3mod4_correct (x:F q) :
       ((exists y, y*y = x) <-> (sqrt_3mod4 x)*(sqrt_3mod4 x) = x)%F.
@@ -105,7 +108,7 @@ Module F.
       repeat match goal with
              | |- _ => progress subst
              | |- _ => progress rewrite ?F.pow_0_l, <-?F.pow_add_r
-             | |- _ => progress rewrite <-?Z2N.inj_0, <-?Z2N.inj_add by zero_bounds
+             | |- _ => progress rewrite <-?Z2N.inj_0, <-?Z2N.inj_add by Z.zero_bounds
              | |- _ => rewrite <-@euler_criterion by auto
              | |- ?x ^ (?f _) = ?a <-> ?x ^ (?f _) = ?a => do 3 f_equiv; [ ]
              | |- _ => rewrite !Zmod_odd in *; repeat (break_match; break_match_hyps); omega
@@ -114,10 +117,10 @@ Module F.
              | |- (?x ^ Z.to_N ?a = 1) <-> _ =>
                transitivity (x ^ Z.to_N a * x ^ Z.to_N 1 = x);
                  [ rewrite F.pow_1_r, Algebra.Field.mul_cancel_l_iff by auto; reflexivity | ]
-             | |- (_ <> _)%N => rewrite Z2N.inj_iff by zero_bounds
-             | |- (?a <> 0)%Z => assert (0 < a) by zero_bounds; omega
+             | |- (_ <> _)%N => rewrite Z2N.inj_iff by Z.zero_bounds
+             | |- (?a <> 0)%Z => assert (0 < a) by Z.zero_bounds; omega
              | |- (_ = _)%Z => replace 4 with (2 * 2)%Z in * by ring;
-                                 rewrite <-Z.div_div by zero_bounds;
+                                 rewrite <-Z.div_div by Z.zero_bounds;
                                  rewrite Z.add_diag, Z.mul_add_distr_l, Z.mul_div_eq by omega
              end.
     Qed.
@@ -142,7 +145,7 @@ Module F.
       destruct (Zle_lt_or_eq _ _ two_le_q) as [H|H]; [exact H|].
       rewrite <-H in *. discriminate.
     Qed.
-    Local Hint Resolve two_lt_q_5mod8.
+    Local Hint Resolve two_lt_q_5mod8 : core.
 
     Definition sqrt_5mod8 (a : F q) : F q :=
       let b := a ^ Z.to_N (q / 8 + 1) in
@@ -164,10 +167,10 @@ Module F.
       rewrite !F.pow_pow_l.
 
       replace (Z.to_N (q / 8 + 1) * (2*2))%N with (Z.to_N (q / 2 + 2))%N.
-      Focus 2. { (* this is a boring but gnarly proof :/ *)
+      2: { (* this is a boring but gnarly proof :/ *)
         change (2*2)%N with (Z.to_N 4).
-        rewrite <- Z2N.inj_mul by zero_bounds.
-        apply Z2N.inj_iff; try zero_bounds.
+        rewrite <- Z2N.inj_mul by Z.zero_bounds.
+        apply Z2N.inj_iff; try Z.zero_bounds.
         rewrite <- Z.mul_cancel_l with (p := 2) by omega.
         ring_simplify.
         rewrite Z.mul_div_eq by omega.
@@ -177,9 +180,9 @@ Module F.
         rewrite q_5mod8.
         replace (5 mod 2)%Z with 1%Z by auto.
         ring.
-      } Unfocus.
+      }
 
-      rewrite Z2N.inj_add, F.pow_add_r by zero_bounds.
+      rewrite Z2N.inj_add, F.pow_add_r by Z.zero_bounds.
       replace (x ^ Z.to_N (q / 2)) with (F.of_Z q 1) by
           (symmetry; apply @euler_criterion; eauto).
       change (Z.to_N 2) with 2%N; ring.
@@ -215,8 +218,8 @@ Module F.
         repeat match goal with
              | |- _ => progress subst
              | |- _ => progress rewrite ?F.pow_0_l
-             | |- (_ <> _)%N => rewrite <-Z2N.inj_0, Z2N.inj_iff by zero_bounds
-             | |- (?a <> 0)%Z => assert (0 < a) by zero_bounds; omega
+             | |- (_ <> _)%N => rewrite <-Z2N.inj_0, Z2N.inj_iff by Z.zero_bounds
+             | |- (?a <> 0)%Z => assert (0 < a) by Z.zero_bounds; omega
              | |- _ => congruence
              end.
         break_match;

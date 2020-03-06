@@ -618,6 +618,27 @@ Proof.
   auto using fieldwiseb'_fieldwise'.
 Qed.
 
+Lemma map_ext {A B} (f g : A -> B) n (t : tuple A n) :
+  (forall x : A, f x = g x) ->
+  map f t = map g t.
+Proof.
+  destruct n; [reflexivity|]; cbn in *.
+  induction n; cbn in *; intro H; auto; [ ].
+  rewrite IHn by assumption.
+  rewrite H; reflexivity.
+Qed.
+
+Lemma map_ext_In {A B} (f g : A -> B) n (t : tuple A n) :
+  (forall x, In x (to_list n t) -> f x = g x) ->
+  map f t = map g t.
+Proof.
+  destruct n; [reflexivity|]; cbn in *.
+  induction n; cbn in *; intro H; auto; [ ].
+  destruct t.
+  rewrite IHn by auto using in_cons.
+  rewrite H; auto using in_eq.
+Qed.
+
 
 Fixpoint from_list_default' {T} (d y:T) (n:nat) (xs:list T) : tuple' T n :=
   match n return tuple' T n with
@@ -671,8 +692,6 @@ Definition apply {R T} (n:nat) : function R T n -> tuple T n -> R :=
   | O => fun r _ => r
   | S n' => fun f x =>  apply' n' f x
   end.
-
-Require Import Coq.Lists.SetoidList.
 
 Lemma fieldwise_to_list_iff : forall {T T' n} R (s : tuple T n) (t : tuple T' n),
     (fieldwise R s t <-> Forall2 R (to_list _ s) (to_list _ t)).
@@ -1133,6 +1152,8 @@ Proof.
   repeat intro; subst; apply (@fieldwise_Proper_gen A B eq eq); try assumption;
     repeat intro; subst; auto; reflexivity.
 Qed.
+
+Require Import Coq.Lists.SetoidList.
 
 Global Instance fieldwise'_Proper
   : forall {n A B}, Proper (pointwise_relation _ (pointwise_relation _ impl) ==> eq ==> eq ==> impl) (@fieldwise' A B n) | 10.

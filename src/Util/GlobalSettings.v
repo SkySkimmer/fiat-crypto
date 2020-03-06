@@ -5,6 +5,9 @@
     => _ end]. *)
 Global Set Asymmetric Patterns.
 
+(** Enforce uniform parameters *)
+Global Set Uniform Inductive Parameters.
+
 (** Consider also: *)
 (** Judgmental η for records, faster projections *)
 (** Set Primitive Projections. *)
@@ -22,3 +25,6 @@ Global Set Asymmetric Patterns.
 
 (** Better-behaved [simpl] *)
 (** Set SimplIsCbn. *)
+
+(** Faster printing *)
+Global Set Fast Name Printing.

@@ -1,4 +1,5 @@
 Require Import Coq.ZArith.ZArith Coq.micromega.Lia.
+Require Import Coq.ZArith.Znumtheory Coq.ZArith.Zpow_facts.
 Require Import Crypto.Util.ZUtil.Hints.Core.
 Require Import Crypto.Util.ZUtil.ZSimplify.Core.
 Local Open Scope Z_scope.
@@ -82,6 +83,43 @@ Module Z.
   Hint Rewrite <- sub_mod_r : pull_Zmod.
   Hint Resolve sub_mod_r : zarith.
 
+  Lemma lnot_mod_mod v m : (Z.lnot (v mod m) mod m) = (Z.lnot v) mod m.
+  Proof.
+    cbv [Z.lnot]; etransitivity; rewrite <- !Z.sub_1_r, Z.sub_mod_full, Z.opp_mod_mod, ?Zmod_mod; reflexivity.
+  Qed.
+  Hint Rewrite lnot_mod_mod : pull_Zmod.
+  Hint Resolve lnot_mod_mod : zarith.
+
+  Lemma mod_pow_full p q n : (p^q) mod n = ((p mod n)^q) mod n.
+  Proof.
+    destruct (Z_dec' n 0) as [ [H|H] | H]; subst;
+      [
+      | apply Zpower_mod; assumption
+      | rewrite !Zmod_0_r; reflexivity ].
+    { revert H.
+      rewrite <- (Z.opp_involutive (p^q)),
+      <- (Z.opp_involutive ((p mod n)^q)),
+      <- (Z.opp_involutive p),
+      <- (Z.opp_involutive n).
+      generalize (-n); clear n; intros n H.
+      rewrite !Zmod_opp_opp.
+      rewrite !Z.opp_involutive.
+      apply f_equal.
+      destruct (Z.Even_or_Odd q).
+      { rewrite !Z.pow_opp_even by (assumption || omega).
+        destruct (Z.eq_dec (p^q mod n) 0) as [H'|H'], (Z.eq_dec ((-p mod n)^q mod n) 0) as [H''|H''];
+          repeat first [ rewrite Z_mod_zero_opp_full by assumption
+                       | rewrite Z_mod_nz_opp_full by assumption
+                       | reflexivity
+                       | rewrite <- Zpower_mod, Z.pow_opp_even in H'' by (assumption || omega); omega
+                       | rewrite <- Zpower_mod, Z.pow_opp_even in H'' |- * by (assumption || omega); omega ]. }
+      { rewrite Z.pow_opp_odd, !Z.opp_involutive, <- Zpower_mod, Z.pow_opp_odd, ?Z.opp_involutive by (assumption || omega).
+        reflexivity. } }
+  Qed.
+  Hint Rewrite <- mod_pow_full : pull_Zmod.
+  Hint Resolve mod_pow_full : zarith.
+  Notation pow_mod_full := mod_pow_full.
+
   Definition NoZMod (x : Z) := True.
   Ltac NoZMod :=
     lazymatch goal with
@@ -128,4 +166,12 @@ Module Z.
   Lemma opp_mod_mod_push a n : NoZMod a -> (-a) mod n = (-(a mod n)) mod n.
   Proof. intros; apply opp_mod_mod; assumption. Qed.
   Hint Rewrite opp_mod_mod_push using solve [ NoZMod ] : push_Zmod.
+
+  Lemma lnot_mod_mod_push v m : NoZMod v -> (Z.lnot v) mod m = (Z.lnot (v mod m) mod m).
+  Proof. intros; symmetry; apply lnot_mod_mod. Qed.
+  Hint Rewrite lnot_mod_mod_push using solve [ NoZMod ] : push_Zmod.
+
+  Lemma pow_mod_push p q n : NoZMod p -> (p^q) mod n = ((p mod n)^q) mod n.
+  Proof. intros; apply pow_mod_full. Qed.
+  Hint Rewrite pow_mod_push using solve [ NoZMod ] : push_Zmod.
 End Z.

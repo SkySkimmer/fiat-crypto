@@ -14,6 +14,12 @@ Reserved Infix "∘" (at level 40, left associativity).
 Reserved Infix "∘ᶠ" (at level 40, left associativity).
 Reserved Infix "∘f" (at level 40, left associativity).
 Reserved Infix "'o'" (at level 40, left associativity).
+Reserved Infix "==" (at level 70, no associativity).
+Reserved Infix "===" (at level 70, no associativity).
+Reserved Infix "====" (at level 70, no associativity).
+Reserved Infix "=====" (at level 70, no associativity).
+Reserved Infix "======" (at level 70, no associativity).
+Reserved Infix "~=" (at level 70, no associativity).
 Reserved Infix "=?" (at level 70, no associativity).
 Reserved Infix "<?" (at level 70, no associativity).
 Reserved Infix "<=?" (at level 70, no associativity).
@@ -26,23 +32,49 @@ Reserved Infix "=ₙ?" (at level 70, no associativity).
 Reserved Infix "=ℤ?" (at level 70, no associativity).
 Reserved Infix "=ᶻ?" (at level 70, no associativity).
 Reserved Infix "=ⁿ?" (at level 70, no associativity).
+Reserved Notation "f ?" (at level 9, format "f ?").
+Reserved Notation "f [ ? ]" (at level 9, format "f [ ? ]").
+Reserved Notation "f +" (at level 50, format "f +").
+Reserved Notation "f *" (at level 40, format "f *").
+(* to match with ssreflect *)
+Reserved Notation "x \in A"
+  (at level 70, format "'[hv' x '/ '  \in  A ']'", no associativity).
+Reserved Notation "x \notin A"
+  (at level 70, format "'[hv' x '/ '  \notin  A ']'", no associativity).
+Reserved Notation "x ∈ A"
+  (at level 70, format "'[hv' x '/ '  ∈  A ']'", no associativity).
+Reserved Notation "x ∉ A"
+  (at level 70, format "'[hv' x '/ '  ∉  A ']'", no associativity).
+Reserved Notation "x +' y" (at level 50, left associativity).
+Reserved Notation "x -' y" (at level 50, left associativity).
+Reserved Notation "x *' y" (at level 40, left associativity).
+Reserved Notation "x /' y" (at level 40, left associativity).
+Reserved Notation "-' x" (at level 35, right associativity).
+Reserved Notation "/' x" (at level 35, right associativity).
+Reserved Notation "x ^' y" (at level 30, right associativity).
 Reserved Infix ".+" (at level 50).
 Reserved Infix ".*" (at level 50).
+Reserved Notation "' x" (at level 20, no associativity, format "' x").
 Reserved Notation "x ^ 2" (at level 30, format "x ^ 2").
 Reserved Notation "x ^ 3" (at level 30, format "x ^ 3").
 Reserved Notation "2 ^ e" (at level 30, format "2 ^ e", only printing).
 Reserved Infix "mod" (at level 40, no associativity).
+Reserved Infix "mod'" (at level 40, no associativity).
 Reserved Notation "'canonical' 'encoding' 'of' T 'as' B" (at level 50).
 Reserved Notation "@ 'is_eq_dec' T R" (at level 10, T at level 8, R at level 8).
 Reserved Infix "@" (left associativity, at level 11).
 Reserved Infix "@1" (left associativity, at level 11).
 Reserved Infix "@₁" (left associativity, at level 11).
 Reserved Infix "@@" (left associativity, at level 11).
+Reserved Infix "<<'" (at level 30, no associativity).
+Reserved Infix ">>'" (at level 30, no associativity).
 Reserved Infix "<<" (at level 30, no associativity).
 Reserved Infix ">>" (at level 30, no associativity).
 Reserved Infix ">>>" (at level 30, no associativity).
 Reserved Infix "&'" (at level 50). (* N.B.  If we used '&', it would conflict with [{ a : T & P}] for [sigT] *)
+Reserved Infix "&''" (at level 50).
 Reserved Infix "∣" (at level 50).
+Reserved Infix "∣'" (at level 50).
 Reserved Infix "~=" (at level 70).
 Reserved Infix "==" (at level 70, no associativity).
 Reserved Notation "x == y  :>  T"
@@ -72,6 +104,9 @@ Reserved Infix "≡₂₅₆" (at level 70, no associativity).
 Reserved Infix "≢₂₅₆" (at level 70, no associativity).
 Reserved Infix "≡₅₁₂" (at level 70, no associativity).
 Reserved Infix "≢₅₁₂" (at level 70, no associativity).
+Reserved Infix "|||" (at level 50, left associativity).
+Reserved Notation "A ||->{ f } B" (at level 50, left associativity). (* would be nice to make these Reserved Infix, but but it doesn't work; cf COQBUG(https://github.com/coq/coq/issues/11402) *)
+Reserved Notation "A |||->{ f } B" (at level 50, left associativity). (* would be nice to make these Reserved Infix, but but it doesn't work; cf COQBUG(https://github.com/coq/coq/issues/11402) *)
 (* Put these at level 71 so they don't conflict with the infix notations at level 70 *)
 Reserved Notation "<" (at level 71).
 Reserved Notation ">" (at level 71).
@@ -87,12 +122,19 @@ Reserved Notation "** x" (at level 30).
 Reserved Notation "A <- X ; B" (at level 70, X at next level, right associativity, format "'[v' A  <-  X ; '/' B ']'").
 Reserved Notation "A <-- X ; B" (at level 70, X at next level, right associativity, format "'[v' A  <--  X ; '/' B ']'").
 Reserved Notation "A <--- X ; B" (at level 70, X at next level, right associativity, format "'[v' A  <---  X ; '/' B ']'").
+Reserved Notation "A <---- X ; B" (at level 70, X at next level, right associativity, format "'[v' A  <----  X ; '/' B ']'").
+Reserved Notation "A <----- X ; B" (at level 70, X at next level, right associativity, format "'[v' A  <-----  X ; '/' B ']'").
+Reserved Notation "A ;; B" (at level 70, right associativity, format "'[v' A ;; '/' B ']'").
+Reserved Notation "A ;;->{ f } B" (at level 70, right associativity, format "'[v' A ;;->{ f } '/' B ']'").
+Reserved Notation "A ;;; B" (at level 70, right associativity, format "'[v' A ;;; '/' B ']'").
 Reserved Notation "u [ i ]" (at level 30).
 Reserved Notation "v [[ i ]]" (at level 30).
 Reserved Notation "u {{ i }}" (at level 30).
 Reserved Notation "a # b" (at level 55, no associativity). (* match with theories/QArith/QArith_base.v *)
 Reserved Notation "'plet' x := y 'in' z"
          (at level 200, z at level 200, format "'plet'  x  :=  y  'in' '//' z").
+Reserved Notation "'subst_let' x := y 'in' z"
+         (at level 200, z at level 200, format "'subst_let'  x  :=  y  'in' '//' z").
 Reserved Notation "'nlet' x := A 'in' b"
          (at level 200, b at level 200, x at level 99, format "'nlet'  x  :=  A  'in' '//' b").
 Reserved Notation "'nlet' x : tx := A 'in' b"
@@ -112,6 +154,9 @@ Reserved Notation "'dlet' x .. y := v 'in' f"
          (at level 200, x binder, y binder, f at level 200, format "'dlet'  x .. y  :=  v  'in' '//' f").
 Reserved Notation "'pflet' x , pf := y 'in' f"
          (at level 200, f at level 200, format "'pflet'  x ,  pf  :=  y  'in' '//' f").
+
+Notation "'subst_let' x := y 'in' z" := (match y return _ with x => z end) (only parsing).
+
 Reserved Notation "'λ' x .. y , t" (at level 200, x binder, y binder, right associativity, format "'λ'  x .. y , '//' t").
 Reserved Notation "'λn'  x .. y , t" (at level 200, right associativity).
 Reserved Notation "x ::> ( max_bitwidth = v )"
@@ -137,7 +182,12 @@ Reserved Notation "A ~> R" (at level 99).
 Reserved Notation "A --->" (left associativity, at level 65).
 Reserved Notation "'return' x" (at level 70, format "'return'  x").
 Reserved Notation "f x" (only printing, at level 10, left associativity).
-Reserved Notation "# x" (at level 0, format "# x").
-Reserved Notation "## x" (at level 0, format "## x").
-Reserved Notation "### x" (at level 0, format "### x").
+(* TODO: Remove this next one if and when we drop support for Coq 8.7; it's present in the stdlib in 8.8 *)
+Reserved Notation "{ x  &  P }" (at level 0, x at level 99).
+Reserved Notation "$ x" (at level 9, x at level 9, format "$ x").
+Reserved Notation "# x" (at level 9, x at level 9, format "# x").
+Reserved Notation "## x" (at level 9, x at level 9, format "## x").
+Reserved Notation "### x" (at level 9, x at level 9, format "### x").
+Reserved Notation "#### x" (at level 9, x at level 9, format "#### x").
+Reserved Notation "##### x" (at level 9, x at level 9, format "##### x").
 Reserved Notation "\ x .. y , t" (at level 200, x binder, y binder, right associativity, format "\  x .. y , '//' t").

@@ -13,6 +13,14 @@ Module Z.
   Definition add_modulo x y modulus :=
     if (modulus <=? x + y) then (x + y) - modulus else (x + y).
 
+  (** Logical negation, modulo a number *)
+  Definition lnot_modulo (v : Z) (modulus : Z) : Z
+    := Z.lnot v mod modulus.
+
+  (** Boolean negation *)
+  Definition bneg (v : Z) : Z
+    := if dec (v = 0) then 1 else 0.
+
   (* most significant bit *)
   Definition cc_m s x := if dec (2 ^ (Z.log2 s) = s) then x >> (Z.log2 s - 1) else x / (s / 2).
 
@@ -26,12 +34,15 @@ Module Z.
        then ((lo + (hi << k)) >> n) &' (Z.ones k)
        else ((lo + hi * s) >> n) mod s.
 
+  (** left-shift that truncates *)
+  Definition truncating_shiftl bw x n := (x << n) mod (2^bw).
+
   Definition get_carry (bitwidth : Z) (v : Z) : Z * Z
     := (v mod 2^bitwidth, v / 2^bitwidth).
   Definition add_with_carry (c : Z) (x y : Z) : Z
     := c + x + y.
   Definition add_with_get_carry (bitwidth : Z) (c : Z) (x y : Z) : Z * Z
-    := get_carry bitwidth (add_with_carry c x y).
+    := dlet v := add_with_carry c x y in get_carry bitwidth v.
   Definition add_get_carry (bitwidth : Z) (x y : Z) : Z * Z
     := add_with_get_carry bitwidth 0 x y.
 
@@ -41,7 +52,7 @@ Module Z.
   Definition sub_with_borrow (c : Z) (x y : Z) : Z
     := add_with_carry (-c) x (-y).
   Definition sub_with_get_borrow (bitwidth : Z) (c : Z) (x y : Z) : Z * Z
-    := get_borrow bitwidth (sub_with_borrow c x y).
+    := dlet v := sub_with_borrow c x y in get_borrow bitwidth v.
   Definition sub_get_borrow (bitwidth : Z) (x y : Z) : Z * Z
     := sub_with_get_borrow bitwidth 0 x y.
 
@@ -66,16 +77,40 @@ Module Z.
 
   Definition mul_split_at_bitwidth (bitwidth : Z) (x y : Z) : Z * Z
     := dlet xy := x * y in
-        (match bitwidth with
-         | Z.pos _ | Z0 => xy &' Z.ones bitwidth
-         | Z.neg _ => xy mod 2^bitwidth
-         end,
-         match bitwidth with
-         | Z.pos _ | Z0 => xy >> bitwidth
-         | Z.neg _ => xy / 2^bitwidth
-         end).
+       (if Z.geb bitwidth 0
+        then xy &' Z.ones bitwidth
+        else xy mod 2^bitwidth,
+        if Z.geb bitwidth 0
+        then xy >> bitwidth
+        else xy / 2^bitwidth).
   Definition mul_split (s x y : Z) : Z * Z
     := if s =? 2^Z.log2 s
        then mul_split_at_bitwidth (Z.log2 s) x y
        else ((x * y) mod s, (x * y) / s).
+
+  Definition mul_high (s x y : Z) : Z
+    := snd (mul_split s x y).
+
+  (** returns [1] iff [x < y] *)
+  Definition ltz (x y : Z) : Z
+    := if x <? y then 1 else 0.
+
+  Definition combine_at_bitwidth (bitwidth lo hi : Z) : Z
+    := lo + (hi << bitwidth).
+
+  (** if positive, round up to 2^k-1 (0b11111....); if negative, round down to -2^k (0b...111000000...) *)
+  Definition round_lor_land_bound (x : Z) : Z
+    := if (0 <=? x)%Z
+       then 2^(Z.log2_up (x+1))-1
+       else -2^(Z.log2_up (-x)).
+
+  Fixpoint log10_fuel (fuel : nat) (v : Z) :=
+    match fuel with
+    | O => 0
+    | S fuel
+      => if v >? 1
+         then 1 + log10_fuel fuel (v / 10)
+         else 0
+    end.
+  Definition log10 (v : Z) : Z := log10_fuel (Z.to_nat (Z.log2 v)) v.
 End Z.

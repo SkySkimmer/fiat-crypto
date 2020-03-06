@@ -1,5 +1,7 @@
 Require Coq.Logic.Eqdep_dec.
 Require Import Coq.Numbers.Natural.Peano.NPeano Coq.omega.Omega.
+Require Import Coq.Classes.Morphisms.
+Require Import Coq.Relations.Relation_Definitions.
 Require Import Coq.micromega.Lia.
 Import Nat.
 
@@ -58,6 +60,20 @@ Ltac omega_with_min_max_case :=
 Tactic Notation "omega" := coq_omega.
 Tactic Notation "omega" "*" := omega_with_min_max_case.
 Tactic Notation "omega" "**" := omega_with_min_max.
+
+Global Instance nat_rect_Proper {P} : Proper (Logic.eq ==> forall_relation (fun _ => forall_relation (fun _ => Logic.eq)) ==> forall_relation (fun _ => Logic.eq)) (@nat_rect P).
+Proof.
+  cbv [forall_relation]; intros O_case O_case' ? S_case S_case' HS n; subst O_case'; revert O_case.
+  induction n as [|n IHn]; cbn [nat_rect]; intro; rewrite ?IHn, ?HS; reflexivity.
+Qed.
+Global Instance nat_rect_Proper_nondep {P} : Proper (Logic.eq ==> pointwise_relation _ (pointwise_relation _ Logic.eq) ==> Logic.eq ==> Logic.eq) (@nat_rect (fun _ => P)).
+Proof. repeat intro; subst; apply (@nat_rect_Proper (fun _ => P)); eauto. Qed.
+
+Global Instance nat_rect_Proper_nondep_gen {P} (R : relation P) : Proper (R ==> (Logic.eq ==> R ==> R) ==> Logic.eq ==> R) (@nat_rect (fun _ => P)) | 100.
+Proof.
+  cbv [forall_relation respectful]; intros O_case O_case' HO S_case S_case' HS n n' ?; subst n'; revert O_case O_case' HO.
+  induction n as [|n IHn]; cbn [nat_rect]; intros; eauto.
+Qed.
 
 Lemma nat_eq_dec_S x y
   : match nat_eq_dec (S x) (S y), nat_eq_dec x y with
@@ -391,4 +407,37 @@ Proof.
              first [ symmetry; apply testbit_true | apply testbit_true ]
       end;
         rewrite H'' in *; assumption. } }
+Qed.
+
+Lemma max_0_iff a b : Nat.max a b = 0%nat <-> (a = 0%nat /\ b = 0%nat).
+Proof. omega **. Qed.
+
+Lemma push_f_nat_rect {P P'} (f : P -> P') PO PS PS' n
+      (HS : forall x rec, f (PS x rec)
+                          = PS' x (f rec))
+  : f (nat_rect (fun _ => P) PO PS n)
+    = nat_rect
+        (fun _ => _)
+        (f PO)
+        PS'
+        n.
+Proof.
+  induction n as [|n IHn]; cbn [nat_rect]; [ reflexivity | ].
+  rewrite HS, IHn; reflexivity.
+Qed.
+
+Lemma push_f_nat_rect_arrow {P P'} (f : P -> P') {A} PO PS PS' n v
+      (HS : forall x rec v, f (PS x rec v)
+                            = PS' x (fun v => f (rec v)) v)
+      (PS'_Proper : Proper (Logic.eq ==> pointwise_relation _ Logic.eq ==> Logic.eq ==> Logic.eq) PS')
+  : f (nat_rect (fun _ => A -> P) PO PS n v)
+    = nat_rect
+        (fun _ => _)
+        (fun v => f (PO v))
+        PS'
+        n
+        v.
+Proof.
+  revert v; induction n as [|n IHn]; cbn [nat_rect]; [ reflexivity | ]; intro.
+  rewrite HS; apply PS'_Proper; eauto.
 Qed.

@@ -1,1429 +1,1459 @@
-(*****
-
-This file provides a generalized version of arithmetic with "mixed
-radix" numerical systems. Later, parameters are entered into the
-general functions, and they are partially evaluated until only runtime
-basic arithmetic operations remain.
-
-CPS
----
-
-Fuctions are written in continuation passing style (CPS). This means
-that each operation is passed a "continuation" function, which it is
-expected to call on its own output (like a callback). See the end of
-this comment for a motivating example explaining why we do CPS,
-despite a fair amount of resulting boilerplate code for each
-operation. The code block for an operation called A would look like
-this:
-
-```
-Definition A_cps x y {T} f : T := ...
-
-Definition A x y := A_cps x y id.
-Lemma A_cps_id x y : forall {T} f, @A_cps x y T f = f (A x y).
-Hint Opaque A : uncps.
-Hint Rewrite A_cps_id : uncps.
-
-Lemma eval_A x y : eval (A x y) = ...
-Hint Rewrite eval_A : push_basesystem_eval.
-```
-
-`A_cps` is the main, CPS-style definition of the operation (`f` is the
-continuation function). `A` is the non-CPS version of `A_cps`, simply
-defined by passing an identity function to `A_cps`. `A_cps_id` states
-that we can replace the CPS version with the non-cps version. `eval_A`
-is the actual correctness lemma for the operation, stating that it has
-the correct arithmetic properties. In general, the middle block
-containing `A` and `A_cps_id` is boring boilerplate and can be safely
-ignored.
-
-HintDbs
--------
-
-+ `uncps` : Converts CPS operations to their non-CPS versions.
-+ `push_basesystem_eval` : Contains all the correctness lemmas for
-   operations in this file, which are in terms of the `eval` function.
-
-Positional/Associational
-------------------------
-
-We represent mixed-radix numbers in a few different ways:
-
-+ "Positional" : a tuple of numbers and a weight function (nat->Z),
-which is evaluated by multiplying the `i`th element of the tuple by
-`weight i`, and then summing the products.
-+ "Associational" : a list of pairs of numbers--the first is the
-weight, the second is the runtime value. Evaluated by multiplying each
-pair and summing the products.
-
-The associational representation is good for basic operations like
-addition and multiplication; for addition, one can simply just append
-two associational lists. But the end-result code should use the
-positional representation (with each digit representing a machine
-word). Since converting to and fro can be easily compiled away once
-the weight function is known, we use associational to write most of
-the operations and liberally convert back and forth to ensure correct
-output. In particular, it is important to convert before carrying.
-
-Runtime Operations
-------------------
-
-Since some instances of e.g. Z.add or Z.mul operate on (compile-time)
-weights, and some operate on runtime values, we need a way to
-differentiate these cases before partial evaluation. We define a
-runtime_scope to mark certain additions/multiplications as runtime
-values, so they will not be unfolded during partial evaluation. For
-instance, if we have:
-
-```
-Definition f (x y : Z * Z) := (fst x + fst y, (snd x + snd y)%RT).
-```
-
-then when we are partially evaluating `f`, we can easily exclude the
-runtime operations (`cbv - [runtime_add]`) and prevent Coq from trying
-to simplify the second addition.
-
-
-Why CPS?
---------
-
-Let's suppose we want to add corresponding elements of two `list Z`s
-(so on inputs `[1,2,3]` and `[2,3,1]`, we get `[3,5,4]`). We might
-write our function like this :
-
-```
-Fixpoint add_lists (p q : list Z) :=
-  match p, q with
-  | p0 :: p', q0 :: q' =>
-    dlet sum := p0 + q0 in
-    sum :: add_lists p' q'
-  | _, _ => nil
-  end.
-```
-
-(Note : `dlet` is a notation for `Let_In`, which is just a dumb
-wrapper for `let`. This allows us to `cbv - [Let_In]` if we want to
-not simplify certain `let`s.)
-
-A CPS equivalent of `add_lists` would look like this:
-
-```
-Fixpoint add_lists_cps (p q : list Z) {T} (f:list Z->T) :=
-  match p, q with
-  | p0 :: p', q0 :: q' =>
-    dlet sum := p0 + q0 in
-    add_lists_cps p' q' (fun r => f (sum :: r))
-  | _, _ => f nil
-  end.
-```
-
-Now let's try some partial evaluation. The expression we'll evaluate is:
-
-```
-Definition x :=
-    (fun a0 a1 a2 b0 b1 b2 =>
-      let r := add_lists [a0;a1;a2] [b0;b1;b2] in
-      let rr := add_lists r r in
-      add_lists rr rr).
-```
-
-Or, using `add_lists_cps`:
-
-```
-Definition y :=
-    (fun a0 a1 a2 b0 b1 b2 =>
-      add_lists_cps [a0;a1;a2] [b0;b1;b2]
-                     (fun r => add_lists_cps r r
-                     (fun rr => add_lists_cps rr rr id))).
-```
-
-If we run `Eval cbv -[Z.add] in x` and `Eval cbv -[Z.add] in y`, we get
-identical output:
-
-```
-fun a0 a1 a2 b0 b1 b2 : Z =>
-       [a0 + b0 + (a0 + b0) + (a0 + b0 + (a0 + b0));
-       a1 + b1 + (a1 + b1) + (a1 + b1 + (a1 + b1));
-       a2 + b2 + (a2 + b2) + (a2 + b2 + (a2 + b2))]
-```
-
-However, there are a lot of common subexpressions here--this is what
-the `dlet` we put into the functions should help us avoid. Let's try
-`Eval cbv -[Let_In Z.add] in x`:
-
-```
-fun a0 a1 a2 b0 b1 b2 : Z =>
-       (fix add_lists (p q : list Z) {struct p} :
-        list Z :=
-          match p with
-          | [] => []
-          | p0 :: p' =>
-              match q with
-              | [] => []
-              | q0 :: q' =>
-                  dlet sum := p0 + q0 in
-                  sum :: add_lists p' q'
-              end
-          end)
-         ((fix add_lists (p q : list Z) {struct p} :
-           list Z :=
-             match p with
-             | [] => []
-             | p0 :: p' =>
-                 match q with
-                 | [] => []
-                 | q0 :: q' =>
-                     dlet sum := p0 + q0 in
-                     sum :: add_lists p' q'
-                 end
-             end)
-            (dlet sum := a0 + b0 in
-             sum
-             :: (dlet sum0 := a1 + b1 in
-                 sum0 :: (dlet sum1 := a2 + b2 in
-                          [sum1])))
-            (dlet sum := a0 + b0 in
-             sum
-             :: (dlet sum0 := a1 + b1 in
-                 sum0 :: (dlet sum1 := a2 + b2 in
-                          [sum1]))))
-         ((fix add_lists (p q : list Z) {struct p} :
-           list Z :=
-             match p with
-             | [] => []
-             | p0 :: p' =>
-                 match q with
-                 | [] => []
-                 | q0 :: q' =>
-                     dlet sum := p0 + q0 in
-                     sum :: add_lists p' q'
-                 end
-             end)
-            (dlet sum := a0 + b0 in
-             sum
-             :: (dlet sum0 := a1 + b1 in
-                 sum0 :: (dlet sum1 := a2 + b2 in
-                          [sum1])))
-            (dlet sum := a0 + b0 in
-             sum
-             :: (dlet sum0 := a1 + b1 in
-                 sum0 :: (dlet sum1 := a2 + b2 in
-                          [sum1]))))
-```
-
-Not so great. Because the `dlet`s are stuck in the inner terms, we
-can't simplify the expression very nicely. Let's try that on the CPS
-version (`Eval cbv -[Let_In Z.add] in y`):
-
-```
-fun a0 a1 a2 b0 b1 b2 : Z =>
-       dlet sum := a0 + b0 in
-       dlet sum0 := a1 + b1 in
-       dlet sum1 := a2 + b2 in
-       dlet sum2 := sum + sum in
-       dlet sum3 := sum0 + sum0 in
-       dlet sum4 := sum1 + sum1 in
-       dlet sum5 := sum2 + sum2 in
-       dlet sum6 := sum3 + sum3 in
-       dlet sum7 := sum4 + sum4 in
-       [sum5; sum6; sum7]
-```
-
-Isn't that lovely? Since we can push continuation functions "under"
-the `dlet`s, we can end up with a nice, concise, simplified
-expression.
-
-One might suggest that we could just inline the `dlet`s and do common
-subexpression elimination. But some of our terms have so many `dlet`s
-that inlining them all would make a term too huge to process in
-reasonable time, so this is not really an option.
-
-*****)
-
-Require Import Coq.ZArith.ZArith Coq.micromega.Psatz Coq.omega.Omega.
-Require Import Coq.ZArith.BinIntDef.
-Local Open Scope Z_scope.
-
+(* Following http://adam.chlipala.net/theses/andreser.pdf chapter 3 *)
+Require Import Coq.ZArith.ZArith Coq.micromega.Lia.
+Require Import Coq.Structures.Orders.
+Require Import Coq.Lists.List.
 Require Import Crypto.Algebra.Nsatz.
-Require Import Crypto.Util.Decidable Crypto.Util.LetIn.
-Require Import Crypto.Util.ZUtil Crypto.Util.ListUtil Crypto.Util.Sigma.
-Require Import Crypto.Util.CPSUtil Crypto.Util.Prod.
-Require Import Crypto.Util.ZUtil.Zselect.
-Require Import Crypto.Util.ZUtil.Tactics.LtbToLt.
-Require Import Crypto.Util.ZUtil.Definitions.
-Require Import Crypto.Util.ZUtil.CPS.
-Require Import Crypto.Arithmetic.PrimeFieldTheorems.
-Require Import Crypto.Util.Tactics.BreakMatch.
+Require Import Crypto.Arithmetic.ModularArithmeticTheorems.
+Require Import Crypto.Util.Decidable.
+Require Import Crypto.Util.LetIn.
+Require Import Crypto.Util.ListUtil.
+Require Import Crypto.Util.NatUtil.
+Require Import Crypto.Util.Prod.
+Require Import Crypto.Util.Decidable.Bool2Prop.
+Require Import Crypto.Util.Tactics.SpecializeBy.
 Require Import Crypto.Util.Tactics.UniquePose.
-Require Import Crypto.Util.Tactics.VM.
-Require Import Crypto.Util.IdfunWithAlt.
+Require Import Crypto.Util.ZUtil.Definitions.
+Require Import Crypto.Util.ZUtil.EquivModulo.
+Require Import Crypto.Util.ZUtil.Modulo Crypto.Util.ZUtil.Div.
+Require Import Crypto.Util.ZUtil.Zselect.
+Require Import Crypto.Util.ZUtil.Hints.Core.
+Require Import Crypto.Util.ZUtil.Modulo.PullPush.
+Require Import Crypto.Util.ZUtil.Tactics.LtbToLt.
+Require Import Crypto.Util.ZUtil.Tactics.DivModToQuotRem.
+Require Import Crypto.Util.ZUtil.Tactics.RewriteModSmall.
+Require Import Crypto.Util.ZUtil.Tactics.PullPush.Modulo.
+Require Import Crypto.Util.Notations.
+Import ListNotations. Local Open Scope Z_scope.
 
-Require Import Coq.Lists.List. Import ListNotations.
-Require Crypto.Util.Tuple. Local Notation tuple := Tuple.tuple.
+Module Associational.
+  Definition eval (p:list (Z*Z)) : Z :=
+    fold_right (fun x y => x + y) 0%Z (map (fun t => fst t * snd t) p).
 
-Local Ltac prove_id :=
-  repeat match goal with
-         | _ => progress intros
-         | _ => progress simpl
-         | _ => progress cbv [Let_In]
-         | _ => progress (autorewrite with uncps push_id in * )
-         | _ => break_innermost_match_step
-         | _ => contradiction
-         | _ => reflexivity
-         | _ => nsatz
-         | _ => solve [auto]
-         end.
+  Lemma eval_nil : eval nil = 0.
+  Proof. trivial.                                             Qed.
+  Lemma eval_cons p q : eval (p::q) = fst p * snd p + eval q.
+  Proof. trivial.                                             Qed.
+  Lemma eval_app p q: eval (p++q) = eval p + eval q.
+  Proof. induction p; rewrite <-?List.app_comm_cons;
+           rewrite ?eval_nil, ?eval_cons; nsatz.              Qed.
 
-Create HintDb push_basesystem_eval discriminated.
-Local Ltac prove_eval :=
-  repeat match goal with
-         | _ => progress intros
-         | _ => progress simpl
-         | _ => progress cbv [Let_In]
-         | _ => progress Z.ltb_to_lt
-         | _ => progress (autorewrite with push_basesystem_eval uncps push_id cancel_pair in * )
-         | _ => break_innermost_match_step
-         | _ => split
-         | H : _ /\ _ |- _ => destruct H
-         | H : Some _ = Some _ |- _ => progress (inversion H; subst)
-         | _ => discriminate
-         | _ => reflexivity
-         | _ => nsatz
-         end.
+  Hint Rewrite eval_nil eval_cons eval_app : push_eval.
+  Local Ltac push := autorewrite with
+      push_eval push_map push_partition push_flat_map
+      push_fold_right push_nth_default cancel_pair.
 
-Definition mod_eq (m:positive) a b := a mod m = b mod m.
-Global Instance mod_eq_equiv m : RelationClasses.Equivalence (mod_eq m).
-Proof. constructor; congruence. Qed.
-Definition mod_eq_dec m a b : {mod_eq m a b} + {~ mod_eq m a b}
-  := Z.eq_dec _ _.
-Lemma mod_eq_Z2F_iff m a b :
-  mod_eq m a b <-> Logic.eq (F.of_Z m a) (F.of_Z m b).
-Proof. rewrite <-F.eq_of_Z_iff; reflexivity. Qed.
+  Lemma eval_map_mul (a x:Z) (p:list (Z*Z))
+  : eval (List.map (fun t => (a*fst t, x*snd t)) p) = a*x*eval p.
+  Proof. induction p; push; nsatz.                            Qed.
+  Hint Rewrite eval_map_mul : push_eval.
 
-Delimit Scope runtime_scope with RT.
+  Definition mul (p q:list (Z*Z)) : list (Z*Z) :=
+    flat_map (fun t =>
+      map (fun t' =>
+        (fst t * fst t', snd t * snd t'))
+    q) p.
+  Lemma eval_mul p q : eval (mul p q) = eval p * eval q.
+  Proof. induction p; cbv [mul]; push; nsatz.                 Qed.
+  Hint Rewrite eval_mul : push_eval.
 
-Definition runtime_mul := Z.mul.
-Global Notation "a * b" := (runtime_mul a%RT b%RT) : runtime_scope.
-Definition runtime_add := Z.add.
-Global Notation "a + b" := (runtime_add a%RT b%RT) : runtime_scope.
-Definition runtime_opp := Z.opp.
-Global Notation "- a" := (runtime_opp a%RT) : runtime_scope.
-Definition runtime_and := Z.land.
-Global Notation "a &' b" := (runtime_and a%RT b%RT) : runtime_scope.
-Definition runtime_shr := Z.shiftr.
-Global Notation "a >> b" := (runtime_shr a%RT b%RT) : runtime_scope.
-Definition runtime_lor := Z.lor.
-Global Arguments runtime_lor (_ _)%RT.
+  Definition square (p:list (Z*Z)) : list (Z*Z) :=
+    list_rect
+      _
+      nil
+      (fun t ts acc
+       => (dlet two_t2 := 2 * snd t in
+               (fst t * fst t, snd t * snd t)
+                 :: (map (fun t'
+                          => (fst t * fst t', two_t2 * snd t'))
+                         ts))
+            ++ acc)
+      p.
+  Lemma eval_square p : eval (square p) = eval p * eval p.
+  Proof. induction p; cbv [square list_rect Let_In]; push; nsatz. Qed.
+  Hint Rewrite eval_square : push_eval.
 
-Ltac cbv_runtime := cbv beta delta [runtime_add runtime_and runtime_lor runtime_mul runtime_opp runtime_shr].
+  Definition negate_snd (p:list (Z*Z)) : list (Z*Z) :=
+    map (fun cx => (fst cx, -snd cx)) p.
+  Lemma eval_negate_snd p : eval (negate_snd p) = - eval p.
+  Proof. induction p; cbv [negate_snd]; push; nsatz.          Qed.
+  Hint Rewrite eval_negate_snd : push_eval.
 
-Module B.
-  Definition limb := (Z*Z)%type. (* position coefficient and run-time value *)
-  Module Associational.
-    Definition eval (p:list limb) : Z :=
-      List.fold_right Z.add 0%Z (List.map (fun t => fst t * snd t) p).
+  Example base10_2digit_mul (a0:Z) (a1:Z) (b0:Z) (b1:Z) :
+    {ab| eval ab = eval [(10,a1);(1,a0)] * eval [(10,b1);(1,b0)]}.
+    eexists ?[ab].
+    (* Goal: eval ?ab = eval [(10,a1);(1,a0)] * eval [(10,b1);(1,b0)] *)
+    rewrite <-eval_mul.
+    (* Goal: eval ?ab = eval (mul [(10,a1);(1,a0)] [(10,b1);(1,b0)]) *)
+    cbv -[Z.mul eval]; cbn -[eval].
+    (* Goal: eval ?ab = eval [(100,(a1*b1));(10,a1*b0);(10,a0*b1);(1,a0*b0)]%RT *)
+    trivial.                                              Defined.
 
-    Lemma eval_nil : eval nil = 0. Proof. reflexivity. Qed.
-    Lemma eval_cons p q : eval (p::q) = (fst p) * (snd p) + eval q. Proof. reflexivity. Qed.
-    Lemma eval_app p q: eval (p++q) = eval p + eval q.
-    Proof. induction p; simpl eval; rewrite ?eval_nil, ?eval_cons; nsatz. Qed.
-    Hint Rewrite eval_nil eval_cons eval_app : push_basesystem_eval.
+  Lemma eval_partition f (p:list (Z*Z)) :
+    eval (snd (partition f p)) + eval (fst (partition f p)) = eval p.
+  Proof. induction p; cbn [partition]; eta_expand; break_match; cbn [fst snd]; push; nsatz. Qed.
+  Hint Rewrite eval_partition : push_eval.
 
-    Definition multerm (t t' : limb) : limb :=
-      (fst t * fst t', (snd t * snd t')%RT).
-    Lemma eval_map_multerm (a:limb) (q:list limb)
-      : eval (List.map (multerm a) q) = fst a * snd a * eval q.
-    Proof.
-      induction q; cbv [multerm]; simpl List.map;
-        autorewrite with push_basesystem_eval cancel_pair; nsatz.
-    Qed. Hint Rewrite eval_map_multerm : push_basesystem_eval.
+  Lemma eval_partition' f (p:list (Z*Z)) :
+    eval (fst (partition f p)) + eval (snd (partition f p)) = eval p.
+  Proof. rewrite Z.add_comm, eval_partition; reflexivity. Qed.
+  Hint Rewrite eval_partition' : push_eval.
 
-    Definition mul_cps (p q:list limb) {T} (f : list limb->T) :=
-      flat_map_cps (fun t => @map_cps _ _ (multerm t) q) p f.
+  Lemma eval_fst_partition f p : eval (fst (partition f p)) = eval p - eval (snd (partition f p)).
+  Proof. rewrite <- (eval_partition f p); nsatz. Qed.
+  Lemma eval_snd_partition f p : eval (snd (partition f p)) = eval p - eval (fst (partition f p)).
+  Proof. rewrite <- (eval_partition f p); nsatz. Qed.
 
-    Definition mul (p q:list limb) := mul_cps p q id.
-    Lemma mul_cps_id p q: forall {T} f, @mul_cps p q T f = f (mul p q).
-    Proof. cbv [mul_cps mul]; prove_id. Qed.
-    Hint Opaque mul : uncps.
-    Hint Rewrite mul_cps_id : uncps.
+  Definition split (s:Z) (p:list (Z*Z)) : list (Z*Z) * list (Z*Z)
+    := let hi_lo := partition (fun t => fst t mod s =? 0) p in
+       (snd hi_lo, map (fun t => (fst t / s, snd t)) (fst hi_lo)).
+  Lemma eval_snd_split s p (s_nz:s<>0) :
+    s * eval (snd (split s p)) = eval (fst (partition (fun t => fst t mod s =? 0) p)).
+  Proof using Type. cbv [split Let_In]; induction p;
+    repeat match goal with
+    | |- context[?a/?b] =>
+      unique pose proof (Z_div_exact_full_2 a b ltac:(trivial) ltac:(trivial))
+    | _ => progress push
+    | _ => progress break_match
+    | _ => progress nsatz                                end. Qed.
+  Lemma eval_split s p (s_nz:s<>0) :
+    eval (fst (split s p)) + s * eval (snd (split s p)) = eval p.
+  Proof using Type. rewrite eval_snd_split, eval_fst_partition by assumption; cbv [split Let_In]; cbn [fst snd]; omega. Qed.
 
-    Lemma eval_mul p q: eval (mul p q) = eval p * eval q.
-    Proof. cbv [mul mul_cps]; induction p; prove_eval. Qed.
-    Hint Rewrite eval_mul : push_basesystem_eval.
+  Lemma reduction_rule' b s c (modulus_nz:s-c<>0) :
+    (s * b) mod (s - c) = (c * b) mod (s - c).
+  Proof using Type. replace (s * b) with ((c*b) + b*(s-c)) by nsatz.
+    rewrite Z.add_mod,Z_mod_mult,Z.add_0_r,Z.mod_mod;trivial. Qed.
 
-    Section split_cps.
-      Context (s:Z) {T : Type}.
+  Lemma reduction_rule a b s c (modulus_nz:s-c<>0) :
+    (a + s * b) mod (s - c) = (a + c * b) mod (s - c).
+  Proof using Type. apply Z.add_mod_Proper; [ reflexivity | apply reduction_rule', modulus_nz ]. Qed.
 
-      Fixpoint split_cps (xs:list limb)
-               (f :list limb*list limb->T) :=
-        match xs with
-        | nil => f (nil, nil)
-        | cons x xs' =>
-          split_cps xs'
-                (fun sxs' =>
-          Z.eqb_cps (fst x mod s) 0
-                    (fun b =>
-          if b
-          then f (fst sxs',          cons (fst x / s, snd x) (snd sxs'))
-          else f (cons x (fst sxs'), snd sxs')))
-        end.
-    End split_cps.
+  Definition reduce (s:Z) (c:list _) (p:list _) : list (Z*Z) :=
+    let lo_hi := split s p in fst lo_hi ++ mul c (snd lo_hi).
 
-    Definition split s xs := split_cps s xs id.
-    Lemma split_cps_id s p: forall {T} f,
-        @split_cps s T p f = f (split s p).
-    Proof.
-      induction p as [|?? IHp];
+  Lemma eval_reduce s c p (s_nz:s<>0) (modulus_nz:s-eval c<>0) :
+    eval (reduce s c p) mod (s - eval c) = eval p mod (s - eval c).
+  Proof using Type. cbv [reduce]; push.
+         rewrite <-reduction_rule, eval_split; trivial.      Qed.
+  Hint Rewrite eval_reduce : push_eval.
+
+  Lemma eval_reduce_adjusted s c p w c' (s_nz:s<>0) (modulus_nz:s-eval c<>0)
+        (w_mod:w mod s = 0) (w_nz:w <> 0) (Hc' : eval c' = (w / s) * eval c) :
+    eval (reduce w c' p) mod (s - eval c) = eval p mod (s - eval c).
+  Proof using Type.
+    cbv [reduce]; push.
+    rewrite Hc', <- (Z.mul_comm (eval c)), <- !Z.mul_assoc, <-reduction_rule by auto.
+    autorewrite with zsimplify_const; rewrite !Z.mul_assoc, Z.mul_div_eq_full, w_mod by auto.
+    autorewrite with zsimplify_const; rewrite eval_split; trivial.
+  Qed.
+
+  (* reduce at most [n] times, stopping early if the high list is nil at any point *)
+  Definition repeat_reduce (n : nat) (s:Z) (c:list _) (p:list _) : list (Z * Z)
+    := nat_rect
+         _
+         (fun p => p)
+         (fun n' repeat_reduce_n' p
+          => let lo_hi := split s p in
+             if (length (snd lo_hi) =? 0)%nat
+             then p
+             else let p := fst lo_hi ++ mul c (snd lo_hi) in
+                  repeat_reduce_n' p)
+         n
+         p.
+
+  Lemma repeat_reduce_S_step n s c p
+    : repeat_reduce (S n) s c p
+      = if (length (snd (split s p)) =? 0)%nat
+        then p
+        else repeat_reduce n s c (reduce s c p).
+  Proof using Type. cbv [repeat_reduce]; cbn [nat_rect]; break_innermost_match; auto. Qed.
+
+  Lemma eval_repeat_reduce n s c p (s_nz:s<>0) (modulus_nz:s-eval c<>0) :
+    eval (repeat_reduce n s c p) mod (s - eval c) = eval p mod (s - eval c).
+  Proof using Type.
+    revert p; induction n as [|n IHn]; intro p; [ reflexivity | ];
+      rewrite repeat_reduce_S_step; break_innermost_match;
+        [ reflexivity | rewrite IHn ].
+    now rewrite eval_reduce.
+  Qed.
+  Hint Rewrite eval_repeat_reduce : push_eval.
+
+  Lemma eval_repeat_reduce_adjusted n s c p w c' (s_nz:s<>0) (modulus_nz:s-eval c<>0)
+        (w_mod:w mod s = 0) (w_nz:w <> 0) (Hc' : eval c' = (w / s) * eval c) :
+    eval (repeat_reduce n w c' p) mod (s - eval c) = eval p mod (s - eval c).
+  Proof using Type.
+    revert p; induction n as [|n IHn]; intro p; [ reflexivity | ];
+      rewrite repeat_reduce_S_step; break_innermost_match;
+        [ reflexivity | rewrite IHn ].
+    now rewrite eval_reduce_adjusted.
+  Qed.
+
+  (*
+  Definition splitQ (s:Q) (p:list (Z*Z)) : list (Z*Z) * list (Z*Z)
+    := let hi_lo := partition (fun t => (fst t * Zpos (Qden s)) mod (Qnum s) =? 0) p in
+       (snd hi_lo, map (fun t => ((fst t * Zpos (Qden s)) / Qnum s, snd t)) (fst hi_lo)).
+  Lemma eval_snd_splitQ s p (s_nz:Qnum s<>0) :
+   Qnum s * eval (snd (splitQ s p)) = eval (fst (partition (fun t => (fst t * Zpos (Qden s)) mod (Qnum s) =? 0) p)) * Zpos (Qden s).
+  Proof using Type.
+    (* Work around https://github.com/mit-plv/fiat-crypto/issues/381 ([nsatz] can't handle [Zpos]) *)
+    cbv [splitQ Let_In]; cbn [fst snd]; zify; generalize dependent (Zpos (Qden s)); generalize dependent (Qnum s); clear s; intros.
+    induction p;
+    repeat match goal with
+    | |- context[?a/?b] =>
+      unique pose proof (Z_div_exact_full_2 a b ltac:(trivial) ltac:(trivial))
+    | _ => progress push
+    | _ => progress break_match
+    | _ => progress nsatz                                end. Qed.
+  Lemma eval_splitQ s p (s_nz:Qnum s<>0) :
+    eval (fst (splitQ s p)) + (Qnum s * eval (snd (splitQ s p))) / Zpos (Qden s) = eval p.
+  Proof using Type. rewrite eval_snd_splitQ, eval_fst_partition by assumption; cbv [splitQ Let_In]; cbn [fst snd]; Z.div_mod_to_quot_rem_in_goal; nia. Qed.
+  Lemma eval_splitQ_mul s p (s_nz:Qnum s<>0) :
+    eval (fst (splitQ s p)) * Zpos (Qden s) + (Qnum s * eval (snd (splitQ s p))) = eval p * Zpos (Qden s).
+  Proof using Type. rewrite eval_snd_splitQ, eval_fst_partition by assumption; cbv [splitQ Let_In]; cbn [fst snd]; nia. Qed.
+   *)
+  Lemma eval_rev p : eval (rev p) = eval p.
+  Proof using Type. induction p; cbn [rev]; push; lia. Qed.
+  Hint Rewrite eval_rev : push_eval.
+  (*
+  Lemma eval_permutation (p q : list (Z * Z)) : Permutation p q -> eval p = eval q.
+  Proof using Type. induction 1; push; nsatz.                          Qed.
+
+  Module RevWeightOrder <: TotalLeBool.
+    Definition t := (Z * Z)%type.
+    Definition leb (x y : t) := Z.leb (fst y) (fst x).
+    Infix "<=?" := leb.
+    Local Coercion is_true : bool >-> Sortclass.
+    Theorem leb_total : forall a1 a2, a1 <=? a2 \/ a2 <=? a1.
+    Proof using Type.
+      cbv [is_true leb]; intros x y; rewrite !Z.leb_le; pose proof (Z.le_ge_cases (fst x) (fst y)).
+      omega.
+    Qed.
+    Global Instance leb_Transitive : Transitive leb.
+    Proof using Type. repeat intro; unfold is_true, leb in *; Z.ltb_to_lt; omega. Qed.
+  End RevWeightOrder.
+
+  Module RevWeightSort := Mergesort.Sort RevWeightOrder.
+
+  Lemma eval_sort p : eval (RevWeightSort.sort p) = eval p.
+  Proof using Type. symmetry; apply eval_permutation, RevWeightSort.Permuted_sort. Qed.
+  Hint Rewrite eval_sort : push_eval.
+  *)
+  (* rough template (we actually have to do things a bit differently to account for duplicate weights):
+[ dlet fi_c := c * fi in
+   let (fj_high, fj_low) := split fj at s/fi.weight in
+   dlet fi_2 := 2 * fi in
+    dlet fi_2_c := 2 * fi_c in
+    (if fi.weight^2 >= s then fi_c * fi else fi * fi)
+       ++ fi_2_c * fj_high
+       ++ fi_2 * fj_low
+ | fi <- f , fj := (f weight less than i) ]
+   *)
+  (** N.B. We take advantage of dead code elimination to allow us to
+      let-bind partial products that we don't end up using *)
+  (** [v] -> [(v, v*c, v*c*2, v*2)] *)
+  Definition let_bind_for_reduce_square (c:list (Z*Z)) (p:list (Z*Z)) : list ((Z*Z) * list(Z*Z) * list(Z*Z) * list(Z*Z)) :=
+    let two := [(1,2)] (* (weight, value) *) in
+    map (fun t => dlet c_t := mul [t] c in dlet two_c_t := mul c_t two in dlet two_t := mul [t] two in (t, c_t, two_c_t, two_t)) p.
+  Definition reduce_square (s:Z) (c:list (Z*Z)) (p:list (Z*Z)) : list (Z*Z) :=
+    let p := let_bind_for_reduce_square c p in
+    let div_s := map (fun t => (fst t / s, snd t)) in
+    list_rect
+      _
+      nil
+      (fun t ts acc
+       => (let '(t, c_t, two_c_t, two_t) := t in
+           (if ((fst t * fst t) mod s =? 0)
+            then div_s (mul [t] c_t)
+            else mul [t] [t])
+             ++ (flat_map
+                   (fun '(t', c_t', two_c_t', two_t')
+                    => if ((fst t * fst t') mod s =? 0)
+                       then div_s
+                              (if fst t' <=? fst t
+                               then mul [t'] two_c_t
+                               else mul [t] two_c_t')
+                       else (if fst t' <=? fst t
+                             then mul [t'] two_t
+                             else mul [t] two_t'))
+                   ts))
+            ++ acc)
+      p.
+  Lemma eval_map_div s p (s_nz:s <> 0) (Hmod : forall v, In v p -> fst v mod s = 0)
+    : eval (map (fun x => (fst x / s, snd x)) p) = eval p / s.
+  Proof using Type.
+    assert (Hmod' : forall v, In v p -> (fst v * snd v) mod s = 0).
+    { intros; push_Zmod; rewrite Hmod by assumption; autorewrite with zsimplify_const; reflexivity. }
+    induction p as [|p ps IHps]; push.
+    { autorewrite with zsimplify_const; reflexivity. }
+    { cbn [In] in *; rewrite Z.div_add_exact by eauto.
+      rewrite !Z.Z_divide_div_mul_exact', IHps by auto using Znumtheory.Zmod_divide.
+      nsatz. }
+  Qed.
+  Lemma eval_map_mul_div s a b c (s_nz:s <> 0) (a_mod : (a*a) mod s = 0)
+    : eval (map (fun x => ((a * (a * fst x)) / s, b * (b * snd x))) c) = ((a * a) / s) * (b * b) * eval c.
+  Proof using Type.
+    rewrite <- eval_map_mul; apply f_equal, map_ext; intro.
+    rewrite !Z.mul_assoc.
+    rewrite !Z.Z_divide_div_mul_exact' by auto using Znumtheory.Zmod_divide.
+    f_equal; nia.
+  Qed.
+  Hint Rewrite eval_map_mul_div using solve [ auto ] : push_eval.
+
+  Lemma eval_map_mul_div' s a b c (s_nz:s <> 0) (a_mod : (a*a) mod s = 0)
+    : eval (map (fun x => (((a * a) * fst x) / s, (b * b) * snd x)) c) = ((a * a) / s) * (b * b) * eval c.
+  Proof using Type. rewrite <- eval_map_mul_div by assumption; f_equal; apply map_ext; intro; Z.div_mod_to_quot_rem_in_goal; f_equal; nia. Qed.
+  Hint Rewrite eval_map_mul_div' using solve [ auto ] : push_eval.
+
+  Lemma eval_flat_map_if A (f : A -> bool) g h p
+    : eval (flat_map (fun x => if f x then g x else h x) p)
+      = eval (flat_map g (fst (partition f p))) + eval (flat_map h (snd (partition f p))).
+  Proof using Type.
+    induction p; cbn [flat_map partition fst snd]; eta_expand; break_match; cbn [fst snd]; push;
+      nsatz.
+  Qed.
+  (*Local Hint Rewrite eval_flat_map_if : push_eval.*) (* this should be [Local], but that doesn't work *)
+
+  Lemma eval_if (b : bool) p q : eval (if b then p else q) = if b then eval p else eval q.
+  Proof using Type. case b; reflexivity. Qed.
+  Hint Rewrite eval_if : push_eval.
+
+  Lemma split_app s p q :
+    split s (p ++ q) = (fst (split s p) ++ fst (split s q), snd (split s p) ++ snd (split s q)).
+  Proof using Type.
+    cbv [split]; rewrite !partition_app; cbn [fst snd].
+    rewrite !map_app; reflexivity.
+  Qed.
+  Lemma fst_split_app s p q :
+    fst (split s (p ++ q)) = fst (split s p) ++ fst (split s q).
+  Proof using Type. rewrite split_app; reflexivity. Qed.
+  Lemma snd_split_app s p q :
+    snd (split s (p ++ q)) = snd (split s p) ++ snd (split s q).
+  Proof using Type. rewrite split_app; reflexivity. Qed.
+  Hint Rewrite fst_split_app snd_split_app : push_eval.
+
+  Lemma eval_reduce_list_rect_app A s c N C p :
+    eval (reduce s c (@list_rect A _ N (fun x xs acc => C x xs ++ acc) p))
+    = eval (@list_rect A _ (reduce s c N) (fun x xs acc => reduce s c (C x xs) ++ acc) p).
+  Proof using Type.
+    cbv [reduce]; induction p as [|p ps IHps]; cbn [list_rect]; push; [ nsatz | rewrite <- IHps; clear IHps ].
+    push; nsatz.
+  Qed.
+  Hint Rewrite eval_reduce_list_rect_app : push_eval.
+
+  Lemma eval_list_rect_app A N C p :
+    eval (@list_rect A _ N (fun x xs acc => C x xs ++ acc) p)
+    = @list_rect A _ (eval N) (fun x xs acc => eval (C x xs) + acc) p.
+  Proof using Type. induction p; cbn [list_rect]; push; nsatz. Qed.
+  Hint Rewrite eval_list_rect_app : push_eval.
+
+  Local Existing Instances list_rect_Proper pointwise_map flat_map_Proper.
+  Local Hint Extern 0 (Proper _ _) => solve_Proper_eq : typeclass_instances.
+
+  Lemma reduce_nil s c : reduce s c nil = nil.
+  Proof using Type. cbv [reduce]; induction c; cbn; intuition auto. Qed.
+  Hint Rewrite reduce_nil : push_eval.
+
+  Lemma eval_reduce_app s c p q : eval (reduce s c (p ++ q)) = eval (reduce s c p) + eval (reduce s c q).
+  Proof using Type. cbv [reduce]; push; nsatz. Qed.
+  Hint Rewrite eval_reduce_app : push_eval.
+
+  Lemma eval_reduce_cons s c p q :
+    eval (reduce s c (p :: q))
+    = (if fst p mod s =? 0 then eval c * ((fst p / s) * snd p) else fst p * snd p)
+      + eval (reduce s c q).
+  Proof using Type.
+    cbv [reduce split]; cbn [partition fst snd]; eta_expand; push.
+    break_innermost_match; cbn [fst snd map]; push; nsatz.
+  Qed.
+  Hint Rewrite eval_reduce_cons : push_eval.
+
+  Lemma mul_cons_l t ts p :
+    mul (t::ts) p = map (fun t' => (fst t * fst t', snd t * snd t')) p ++ mul ts p.
+  Proof using Type. reflexivity. Qed.
+  Lemma mul_nil_l p : mul nil p = nil.
+  Proof using Type. reflexivity. Qed.
+  Lemma mul_nil_r p : mul p nil = nil.
+  Proof using Type. cbv [mul]; induction p; cbn; intuition auto. Qed.
+  Hint Rewrite mul_nil_l mul_nil_r : push_eval.
+  Lemma mul_app_l p p' q :
+    mul (p ++ p') q = mul p q ++ mul p' q.
+  Proof using Type. cbv [mul]; rewrite flat_map_app; reflexivity. Qed.
+  Lemma mul_singleton_l_app_r p q q' :
+    mul [p] (q ++ q') = mul [p] q ++ mul [p] q'.
+  Proof using Type. cbv [mul flat_map]; rewrite !map_app, !app_nil_r; reflexivity. Qed.
+  Hint Rewrite mul_singleton_l_app_r : push_eval.
+  Lemma mul_singleton_singleton p q :
+    mul [p] [q] = [(fst p * fst q, snd p * snd q)].
+  Proof using Type. reflexivity. Qed.
+
+  Lemma eval_reduce_square_step_helper s c t' t v (s_nz:s <> 0) :
+    (fst t * fst t') mod s = 0 \/ (fst t' * fst t) mod s = 0 -> In v (mul [t'] (mul (mul [t] c) [(1, 2)])) -> fst v mod s = 0.
+  Proof using Type.
+    cbv [mul]; cbn [map flat_map fst snd].
+    rewrite !app_nil_r, flat_map_singleton, !map_map; cbn [fst snd]; rewrite in_map_iff; intros [H|H] [? [? ?] ]; subst; revert H.
+    all:cbn [fst snd]; autorewrite with zsimplify_const; intro H; rewrite Z.mul_assoc, Z.mul_mod_l.
+    all:rewrite H || rewrite (Z.mul_comm (fst t')), H; autorewrite with zsimplify_const; reflexivity.
+  Qed.
+
+  Lemma eval_reduce_square_step s c t ts (s_nz : s <> 0) :
+    eval (flat_map
+            (fun t' => if (fst t * fst t') mod s =? 0
+                    then map (fun t => (fst t / s, snd t))
+                             (if fst t' <=? fst t
+                              then mul [t'] (mul (mul [t] c) [(1, 2)])
+                              else mul [t] (mul (mul [t'] c) [(1, 2)]))
+                    else (if fst t' <=? fst t
+                          then mul [t'] (mul [t] [(1, 2)])
+                          else mul [t] (mul [t'] [(1, 2)])))
+            ts)
+    = eval (reduce s c (mul [(1, 2)] (mul [t] ts))).
+  Proof using Type.
+    induction ts as [|t' ts IHts]; cbn [flat_map]; [ push; nsatz | rewrite eval_app, IHts; clear IHts ].
+    change (t'::ts) with ([t'] ++ ts); rewrite !mul_singleton_l_app_r, !mul_singleton_singleton; autorewrite with zsimplify_const; push.
+    break_match; Z.ltb_to_lt; push; try nsatz.
+    all:rewrite eval_map_div by eauto using eval_reduce_square_step_helper; push; autorewrite with zsimplify_const.
+    all:rewrite ?Z.mul_assoc, <- !(Z.mul_comm (fst t')), ?Z.mul_assoc.
+    all:rewrite ?Z.mul_assoc, <- !(Z.mul_comm (fst t)), ?Z.mul_assoc.
+    all:rewrite <- !Z.mul_assoc, Z.mul_assoc.
+    all:rewrite !Z.Z_divide_div_mul_exact' by auto using Znumtheory.Zmod_divide.
+    all:nsatz.
+  Qed.
+
+  Lemma eval_reduce_square_helper s c x y v (s_nz:s <> 0) :
+    (fst x * fst y) mod s = 0 \/ (fst y * fst x) mod s = 0 -> In v (mul [x] (mul [y] c)) -> fst v mod s = 0.
+  Proof using Type.
+    cbv [mul]; cbn [map flat_map fst snd].
+    rewrite !app_nil_r, ?flat_map_singleton, !map_map; cbn [fst snd]; rewrite in_map_iff; intros [H|H] [? [? ?] ]; subst; revert H.
+    all:cbn [fst snd]; autorewrite with zsimplify_const; intro H; rewrite Z.mul_assoc, Z.mul_mod_l.
+    all:rewrite H || rewrite (Z.mul_comm (fst x)), H; autorewrite with zsimplify_const; reflexivity.
+  Qed.
+
+  Lemma eval_reduce_square_exact s c p (s_nz:s<>0) (modulus_nz:s-eval c<>0)
+    : eval (reduce_square s c p) = eval (reduce s c (square p)).
+  Proof using Type.
+    cbv [let_bind_for_reduce_square reduce_square square Let_In]; rewrite list_rect_map; push.
+    apply list_rect_Proper; [ | repeat intro; subst | reflexivity ]; cbv [split]; push; [ nsatz | ].
+    rewrite flat_map_map, eval_reduce_square_step by auto.
+    break_match; Z.ltb_to_lt; push.
+    1:rewrite eval_map_div by eauto using eval_reduce_square_helper; push.
+    all:cbv [mul]; cbn [map flat_map fst snd]; rewrite !app_nil_r, !map_map; cbn [fst snd].
+    all:autorewrite with zsimplify_const.
+    all:rewrite <- ?Z.mul_assoc, !(Z.mul_comm (fst a)), <- ?Z.mul_assoc.
+    all:rewrite ?Z.mul_assoc, <- (Z.mul_assoc _ (fst a) (fst a)), <- !(Z.mul_comm (fst a * fst a)).
+    1:rewrite !Z.Z_divide_div_mul_exact' by auto using Znumtheory.Zmod_divide.
+    all:idtac;
+      let LHS := match goal with |- ?LHS = ?RHS => LHS end in
+      let RHS := match goal with |- ?LHS = ?RHS => RHS end in
+      let f := match LHS with context[eval (reduce _ _ (map ?f _))] => f end in
+      let g := match RHS with context[eval (reduce _ _ (map ?f _))] => f end in
+      rewrite (map_ext f g) by (intros; f_equal; nsatz).
+    all:nsatz.
+  Qed.
+  Lemma eval_reduce_square s c p (s_nz:s<>0) (modulus_nz:s-eval c<>0)
+    : eval (reduce_square s c p) mod (s - eval c)
+      = (eval p * eval p) mod (s - eval c).
+  Proof using Type. rewrite eval_reduce_square_exact by assumption; push; auto. Qed.
+  Hint Rewrite eval_reduce_square : push_eval.
+
+  Definition bind_snd (p : list (Z*Z)) :=
+    map (fun t => dlet_nd t2 := snd t in (fst t, t2)) p.
+
+  Lemma bind_snd_correct p : bind_snd p = p.
+  Proof using Type.
+    cbv [bind_snd]; induction p as [| [? ?] ];
+      push; [|rewrite IHp]; reflexivity.
+  Qed.
+
+  Section Carries.
+    Definition carryterm (w fw:Z) (t:Z * Z) :=
+      if (Z.eqb (fst t) w)
+      then dlet_nd t2 := snd t in
+           dlet_nd d2 := t2 / fw in
+           dlet_nd m2 := t2 mod fw in
+           [(w * fw, d2);(w,m2)]
+      else [t].
+
+    Lemma eval_carryterm w fw (t:Z * Z) (fw_nonzero:fw<>0):
+      eval (carryterm w fw t) = eval [t].
+    Proof using Type*.
+      cbv [carryterm Let_In]; break_match; push; [|trivial].
+      pose proof (Z.div_mod (snd t) fw fw_nonzero).
+      rewrite Z.eqb_eq in *.
+      nsatz.
+    Qed. Hint Rewrite eval_carryterm using auto : push_eval.
+
+    Definition carry (w fw:Z) (p:list (Z * Z)):=
+      flat_map (carryterm w fw) p.
+
+    Lemma eval_carry w fw p (fw_nonzero:fw<>0):
+      eval (carry w fw p) = eval p.
+    Proof using Type*. cbv [carry]; induction p; push; nsatz. Qed.
+    Hint Rewrite eval_carry using auto : push_eval.
+  End Carries.
+End Associational.
+
+Module Weight.
+  Section Weight.
+    Context weight
+            (weight_0 : weight 0%nat = 1)
+            (weight_positive : forall i, 0 < weight i)
+            (weight_multiples : forall i, weight (S i) mod weight i = 0)
+            (weight_divides : forall i : nat, 0 < weight (S i) / weight i).
+
+    Lemma weight_multiples_full' j : forall i, weight (i+j) mod weight i = 0.
+    Proof using weight_positive weight_multiples.
+      induction j; intros;
         repeat match goal with
-               | _ => rewrite IHp
-               | _ => progress (cbv [split]; prove_id)
+               | _ => rewrite Nat.add_succ_r
+               | _ => rewrite IHj
+               | |- context [weight (S ?x) mod weight _] =>
+                 rewrite (Z.div_mod (weight (S x)) (weight x)), weight_multiples by auto with zarith
+               | _ => progress autorewrite with push_Zmod natsimplify zsimplify_fast
+               | _ => reflexivity
                end.
     Qed.
-    Hint Opaque split : uncps.
-    Hint Rewrite split_cps_id : uncps.
 
-    Lemma eval_split s p (s_nonzero:s<>0):
-      eval (fst (split s p)) + s*eval (snd (split s p)) = eval p.
-    Proof.
-      cbv [split];  induction p; prove_eval.
-      match goal with
-        H:_ |- _ =>
-        unique pose proof (Z_div_exact_full_2 _ _ s_nonzero H)
-        end; nsatz.
-    Qed. Hint Rewrite @eval_split using auto : push_basesystem_eval.
-
-    Definition reduce_cps (s:Z) (c:list limb) (p:list limb)
-               {T} (f : list limb->T) :=
-      split_cps s p
-                (fun ab => mul_cps c (snd ab)
-                                  (fun rr =>f (fst ab ++ rr))).
-
-    Definition reduce s c p := reduce_cps s c p id.
-    Lemma reduce_cps_id s c p {T} f:
-      @reduce_cps s c p T f = f (reduce s c p).
-    Proof. cbv [reduce_cps reduce]; prove_id. Qed.
-    Hint Opaque reduce : uncps.
-    Hint Rewrite reduce_cps_id : uncps.
-
-    Lemma reduction_rule a b s c m (m_eq:Z.pos m = s - c):
-      (a + s * b) mod m = (a + c * b) mod m.
-    Proof.
-      rewrite m_eq. pose proof (Pos2Z.is_pos m).
-      replace (a + s * b) with ((a + c*b) + b*(s-c)) by ring.
-      rewrite Z.add_mod, Z_mod_mult, Z.add_0_r, Z.mod_mod by omega.
-      trivial.
+    Lemma weight_multiples_full j i : (i <= j)%nat -> weight j mod weight i = 0.
+    Proof using weight_positive weight_multiples.
+      intros; replace j with (i + (j - i))%nat by omega.
+      apply weight_multiples_full'.
     Qed.
-    Lemma eval_reduce s c p (s_nonzero:s<>0) m (m_eq : Z.pos m = s - eval c) :
-      mod_eq m (eval (reduce s c p)) (eval p).
-    Proof.
-      cbv [reduce reduce_cps mod_eq]; prove_eval.
-        erewrite <-reduction_rule by eauto; prove_eval.
-    Qed.
-    Hint Rewrite eval_reduce using (omega || assumption) : push_basesystem_eval.
-    (* Why TF does this hint get picked up outside the section (while other eval_ hints do not?) *)
 
+    Lemma weight_divides_full j i : (i <= j)%nat -> 0 < weight j / weight i.
+    Proof using weight_positive weight_multiples. auto using Z.gt_lt, Z.div_positive_gt_0, weight_multiples_full with zarith. Qed.
 
-    Definition negate_snd_cps (p:list limb) {T} (f:list limb ->T) :=
-      map_cps (fun cx => (fst cx, (-snd cx)%RT)) p f.
+    Lemma weight_div_mod j i : (i <= j)%nat -> weight j = weight i * (weight j / weight i).
+    Proof using weight_positive weight_multiples. intros. apply Z.div_exact; auto using weight_multiples_full with zarith. Qed.
 
-    Definition negate_snd p := negate_snd_cps p id.
-    Lemma negate_snd_id p {T} f : @negate_snd_cps p T f = f (negate_snd p).
-    Proof. cbv [negate_snd_cps negate_snd]; prove_id. Qed.
-    Hint Opaque negate_snd : uncps.
-    Hint Rewrite negate_snd_id : uncps.
-
-    Lemma eval_negate_snd p : eval (negate_snd p) = - eval p.
-    Proof.
-      cbv [negate_snd_cps negate_snd]; induction p; prove_eval.
-    Qed. Hint Rewrite eval_negate_snd : push_basesystem_eval.
-
-    Section Carries.
-      Context {modulo_cps div_cps:forall {R},Z->Z->(Z->R)->R}.
-      Let modulo x y := modulo_cps _ x y id.
-      Let div x y := div_cps _ x y id.
-      Context {modulo_cps_id : forall R x y f, modulo_cps R x y f = f (modulo x y)}
-              {div_cps_id : forall R x y f, div_cps R x y f = f (div x y)}.
-      Context {div_mod : forall a b:Z, b <> 0 ->
-                                       a = b * (div a b) + modulo a b}.
-      Hint Rewrite modulo_cps_id div_cps_id : uncps.
-
-      Definition carryterm_cps (w fw:Z) (t:limb) {T} (f:list limb->T) :=
-        Z.eqb_cps (fst t) w (fun eqb =>
-        if eqb
-        then dlet t2 := snd t in
-             div_cps _ t2 fw (fun d2 =>
-             modulo_cps _ t2 fw (fun m2 =>
-             dlet d2 := d2 in
-             dlet m2 := m2 in
-             f ((w*fw, d2) :: (w, m2) :: @nil limb)))
-        else f [t]).
-
-      Definition carryterm w fw t := carryterm_cps w fw t id.
-      Lemma carryterm_cps_id w fw t {T} f :
-        @carryterm_cps w fw t T f
-        = f (@carryterm w fw t).
-      Proof using div_cps_id modulo_cps_id.
-        cbv [carryterm_cps carryterm Let_In]; prove_id.
-      Qed.
-      Hint Opaque carryterm : uncps.
-      Hint Rewrite carryterm_cps_id : uncps.
-
-
-      Lemma eval_carryterm w fw (t:limb) (fw_nonzero:fw<>0):
-        eval (carryterm w fw t) = eval [t].
-      Proof using Type*.
-        cbv [carryterm_cps carryterm Let_In]; prove_eval.
-        specialize (div_mod (snd t) fw fw_nonzero).
-        nsatz.
-      Qed. Hint Rewrite eval_carryterm using auto : push_basesystem_eval.
-
-      Definition carry_cps (w fw:Z) (p:list limb) {T} (f:list limb->T) :=
-        flat_map_cps (carryterm_cps w fw) p f.
-
-      Definition carry w fw p := carry_cps w fw p id.
-      Lemma carry_cps_id w fw p {T} f:
-        @carry_cps w fw p T f = f (carry w fw p).
-      Proof using div_cps_id modulo_cps_id.
-        cbv [carry_cps carry]; prove_id.
-      Qed.
-      Hint Opaque carry : uncps.
-      Hint Rewrite carry_cps_id : uncps.
-
-      Lemma eval_carry w fw p (fw_nonzero:fw<>0):
-        eval (carry w fw p) = eval p.
-      Proof using Type*. cbv [carry_cps carry]; induction p; prove_eval. Qed.
-      Hint Rewrite eval_carry using auto : push_basesystem_eval.
-    End Carries.
-
-  End Associational.
-
-  Ltac div_mod_cps_t :=
-    intros; autorewrite with uncps push_id; try reflexivity.
-
-  Hint Rewrite
-      @Associational.reduce_cps_id
-      @Associational.split_cps_id
-      @Associational.mul_cps_id : uncps.
-  Hint Rewrite
-       @Associational.carry_cps_id
-       @Associational.carryterm_cps_id
-       using div_mod_cps_t : uncps.
-
-
-  Module Positional.
-    Section Positional.
-      Import Associational.
-      Context (weight : nat -> Z) (* [weight i] is the weight of position [i] *)
-              (weight_0 : weight 0%nat = 1%Z)
-              (weight_nonzero : forall i, weight i <> 0).
-
-      (** Converting from positional to associational *)
-      Definition to_associational_cps {n:nat} (xs:tuple Z n)
-                 {T} (f:list limb->T) :=
-        map_cps weight (seq 0 n)
-                (fun r =>
-                   to_list_cps n xs (fun rr => combine_cps r rr f)).
-
-      Definition to_associational {n} xs :=
-        @to_associational_cps n xs _ id.
-      Lemma to_associational_cps_id {n} x {T} f:
-        @to_associational_cps n x T f = f (to_associational x).
-      Proof using Type. cbv [to_associational_cps to_associational]; prove_id. Qed.
-      Hint Opaque to_associational : uncps.
-      Hint Rewrite @to_associational_cps_id : uncps.
-
-      Definition eval {n} x :=
-        @to_associational_cps n x _ Associational.eval.
-
-      Lemma eval_single (x:Z) : eval (n:=1) x = weight 0%nat * x.
-      Proof. cbv - [Z.mul Z.add]. ring. Qed.
-
-      Lemma eval_unit : eval (n:=0) tt = 0.
-      Proof. reflexivity. Qed.
-      Hint Rewrite eval_unit eval_single : push_basesystem_eval.
-
-      Lemma eval_to_associational {n} x :
-        Associational.eval (@to_associational n x) = eval x.
-      Proof using Type.
-        cbv [to_associational_cps eval to_associational]; prove_eval.
-      Qed. Hint Rewrite @eval_to_associational : push_basesystem_eval.
-
-      (** (modular) equality that tolerates redundancy **)
-      Definition eq {sz} m (a b : tuple Z sz) : Prop :=
-        mod_eq m (eval a) (eval b).
-
-      (** Converting from associational to positional *)
-
-      Definition zeros n : tuple Z n := Tuple.repeat 0 n.
-      Lemma eval_zeros n : eval (zeros n) = 0.
-      Proof using Type.
-        cbv [eval Associational.eval to_associational_cps zeros].
-        pose proof (seq_length n 0). generalize dependent (seq 0 n).
-        intro xs; revert n; induction xs as [|?? IHxs]; intros n H;
-          [autorewrite with uncps; reflexivity|].
-        destruct n as [|n]; [distr_length|].
-        specialize (IHxs n). autorewrite with uncps in *.
-        rewrite !@Tuple.to_list_repeat in *.
-        simpl List.repeat. rewrite map_cons, combine_cons, map_cons.
-        simpl fold_right.  rewrite IHxs by distr_length. ring.
-      Qed. Hint Rewrite eval_zeros : push_basesystem_eval.
-
-      Definition add_to_nth_cps {n} i x t {T} (f:tuple Z n->T) :=
-        @on_tuple_cps _ _ 0 (update_nth_cps i (runtime_add x)) n n t _ f.
-
-      Definition add_to_nth {n} i x t := @add_to_nth_cps n i x t _ id.
-      Lemma add_to_nth_cps_id {n} i x xs {T} f:
-        @add_to_nth_cps n i x xs T f = f (add_to_nth i x xs).
-      Proof using weight.
-        cbv [add_to_nth_cps add_to_nth]; erewrite !on_tuple_cps_correct
-          by (intros; autorewrite with uncps; reflexivity); prove_id.
-        Unshelve.
-        intros; subst. autorewrite with uncps push_id. distr_length.
-      Qed.
-      Hint Opaque add_to_nth : uncps.
-      Hint Rewrite @add_to_nth_cps_id : uncps.
-
-      Lemma eval_add_to_nth {n} (i:nat) (x:Z) (H:(i<n)%nat) (xs:tuple Z n):
-        eval (@add_to_nth n i x xs) = weight i * x + eval xs.
-      Proof using Type.
-        cbv [eval to_associational_cps add_to_nth add_to_nth_cps runtime_add].
-        erewrite on_tuple_cps_correct by (intros; autorewrite with uncps; reflexivity).
-        prove_eval.
-        cbv [Tuple.on_tuple].
-        rewrite !Tuple.to_list_from_list.
-        autorewrite with uncps push_id.
-        rewrite ListUtil.combine_update_nth_r at 1.
-        rewrite <-(update_nth_id i (List.combine _ _)) at 2.
-        rewrite <-!(ListUtil.splice_nth_equiv_update_nth_update _ _ (weight 0, 0)); cbv [ListUtil.splice_nth id];
-          repeat match goal with
-                 | _ => progress (apply Zminus_eq; ring_simplify)
-                 | _ => progress autorewrite with push_basesystem_eval cancel_pair distr_length
-                 | _ => progress rewrite <-?ListUtil.map_nth_default_always, ?map_fst_combine, ?List.firstn_all2, ?ListUtil.map_nth_default_always, ?nth_default_seq_inbouns, ?plus_O_n
-                 end; trivial; lia.
-        Unshelve.
-        intros; subst. autorewrite with uncps push_id. distr_length.
-      Qed. Hint Rewrite @eval_add_to_nth using omega : push_basesystem_eval.
-
-      Section place_cps.
-        Context {T : Type}.
-
-        Fixpoint place_cps (t:limb) (i:nat) (f:nat * Z->T) :=
-          Z.eqb_cps (fst t mod weight i) 0 (fun eqb =>
-          if eqb
-          then f (i, let c := fst t / weight i in (c * snd t)%RT)
-          else match i with S i' => place_cps t i' f | O => f (O, fst t * snd t)%RT end).
-      End place_cps.
-
-      Definition place t i := place_cps t i id.
-      Lemma place_cps_id t i {T} f :
-        @place_cps T t i f = f (place t i).
-      Proof using Type. cbv [place]; induction i; prove_id. Qed.
-      Hint Opaque place : uncps.
-      Hint Rewrite place_cps_id : uncps.
-
-      Lemma place_cps_in_range (t:limb) (n:nat)
-        : (fst (place_cps t n id) < S n)%nat.
-      Proof using Type. induction n; simpl; cbv [Z.eqb_cps]; break_match; simpl; omega. Qed.
-      Lemma weight_place_cps t i
-        : weight (fst (place_cps t i id)) * snd (place_cps t i id)
-          = fst t * snd t.
-      Proof using Type*.
-        induction i; cbv [id]; simpl place_cps; cbv [Z.eqb_cps]; break_match;
-          Z.ltb_to_lt;
-          autorewrite with cancel_pair;
-          try match goal with [H:_|-_] => apply Z_div_exact_full_2 in H end;
-          nsatz || auto.
-      Qed.
-
-      Definition from_associational_cps n (p:list limb)
-                 {T} (f:tuple Z n->T):=
-        fold_right_cps2
-          (fun t st T' f' =>
-             place_cps t (pred n)
-                       (fun p=> add_to_nth_cps (fst p) (snd p) st f'))
-          (zeros n) p f.
-
-      Definition from_associational n p := from_associational_cps n p id.
-      Lemma from_associational_cps_id {n} p {T} f:
-        @from_associational_cps n p T f = f (from_associational n p).
-      Proof using Type.
-        cbv [from_associational_cps from_associational]; prove_id.
-      Qed.
-      Hint Opaque from_associational : uncps.
-      Hint Rewrite @from_associational_cps_id : uncps.
-
-      Lemma eval_from_associational {n} p (n_nonzero:n<>O):
-        eval (from_associational n p) = Associational.eval p.
-      Proof using Type*.
-        cbv [from_associational_cps from_associational]; induction p;
-          [|pose proof (place_cps_in_range a (pred n))]; prove_eval.
-        cbv [place]; rewrite weight_place_cps. nsatz.
-      Qed.
-      Hint Rewrite @eval_from_associational using omega
-        : push_basesystem_eval.
-
-
-      Section Wrappers.
-        (* Simple wrappers for Associational definitions; convert to
-        associational, do the operation, convert back. *)
-
-        Definition add_cps {n} (p q : tuple Z n) {T} (f:tuple Z n->T) :=
-          to_associational_cps p
-            (fun P => to_associational_cps q
-              (fun Q => from_associational_cps n (P++Q) f)).
-
-        Definition mul_cps {n m} (p q : tuple Z n) {T} (f:tuple Z m->T) :=
-          to_associational_cps p
-            (fun P => to_associational_cps q
-              (fun Q => Associational.mul_cps P Q
-                (fun PQ => from_associational_cps m PQ f))).
-
-        Definition reduce_cps {m n} (s:Z) (c:list B.limb) (p : tuple Z m)
-                   {T} (f:tuple Z n->T) :=
-          to_associational_cps p
-            (fun P => Associational.reduce_cps s c P
-               (fun R => from_associational_cps n R f)).
-
-        Definition negate_snd_cps {n} (p : tuple Z n)
-                   {T} (f:tuple Z n->T) :=
-          to_associational_cps p
-            (fun P => Associational.negate_snd_cps P
-              (fun R => from_associational_cps n R f)).
-
-        Definition split_cps {n m1 m2} (s:Z) (p : tuple Z n)
-                    {T} (f:(tuple Z m1 * tuple Z m2) -> T) :=
-          to_associational_cps p
-            (fun P => Associational.split_cps s P
-            (fun split_P =>
-               from_associational_cps m1 (fst split_P)
-                 (fun m1_P =>
-               from_associational_cps m2 (snd split_P)
-                 (fun m2_P =>
-                    f (m1_P, m2_P))))).
-
-        Definition scmul_cps {n} (x : Z) (p: tuple Z n)
-                    {T} (f:tuple Z n->T) :=
-          to_associational_cps p
-            (fun P => Associational.mul_cps P [(1, x)]
-            (fun R => from_associational_cps n R f)).
-
-        (* This version of sub does not add balance; bounds must be
-        carefully handled. *)
-        Definition unbalanced_sub_cps {n} (p q: tuple Z n)
-                    {T} (f:tuple Z n->T) :=
-          to_associational_cps p
-            (fun P => to_associational_cps q
-            (fun Q => Associational.negate_snd_cps Q
-            (fun negQ => from_associational_cps n (P ++ negQ) f))).
-
-      End Wrappers.
-      Hint Unfold
-           Positional.add_cps
-           Positional.mul_cps
-           Positional.reduce_cps
-           Positional.negate_snd_cps
-           Positional.split_cps
-           Positional.scmul_cps
-           Positional.unbalanced_sub_cps
-      .
-
-      Section Carries.
-        Context {modulo_cps div_cps:forall {R},Z->Z->(Z->R)->R}.
-        Let modulo x y := modulo_cps _ x y id.
-        Let div x y := div_cps _ x y id.
-        Context {modulo_cps_id : forall R x y f, modulo_cps R x y f = f (modulo x y)}
-                {div_cps_id : forall R x y f, div_cps R x y f = f (div x y)}.
-        Context {div_mod : forall a b:Z, b <> 0 ->
-                                         a = b * (div a b) + modulo a b}.
-        Hint Rewrite modulo_cps_id div_cps_id : uncps.
-
-        Definition carry_cps {n m} (index:nat) (p:tuple Z n)
-                   {T} (f:tuple Z m->T) :=
-          to_associational_cps p
-            (fun P =>  @Associational.carry_cps
-                         modulo_cps div_cps
-                         (weight index)
-                         (weight (S index) / weight index)
-                         P T
-             (fun R => from_associational_cps m R f)).
-
-        Definition carry {n m} i p := @carry_cps n m i p _ id.
-        Lemma carry_cps_id {n m} i p {T} f:
-          @carry_cps n m i p T f = f (carry i p).
-        Proof.
-          cbv [carry_cps carry]; prove_id; rewrite carry_cps_id; reflexivity.
-        Qed.
-        Hint Opaque carry : uncps. Hint Rewrite @carry_cps_id : uncps.
-
-        Lemma eval_carry {n m} i p: (n <> 0%nat) -> (m <> 0%nat) ->
-                                  weight (S i) / weight i <> 0 ->
-          eval (carry (n:=n) (m:=m) i p) = eval p.
-        Proof.
-          cbv [carry_cps carry]; intros. prove_eval.
-          rewrite @eval_carry by eauto.
-          apply eval_to_associational.
-        Qed.
-        Hint Rewrite @eval_carry : push_basesystem_eval.
-
-        Definition carry_reduce_cps {n}
-                   (s:Z) (c:list limb) (p : tuple Z n)
-                   {T} (f: tuple Z n ->T) :=
-          carry_cps (n:=n) (m:=S n) (pred n) p
-            (fun r => reduce_cps (m:=S n) (n:=n) s c r f).
-        Hint Unfold carry_reduce_cps.
-
-        (* N.B. It is important to reverse [idxs] here. Like
-        [fold_right], [fold_right_cps2] is written such that the first
-        terms in the list are actually used last in the computation. For
-        example, running:
-
-        `Eval cbv - [Z.add] in (fun a b c d => fold_right Z.add d [a;b;c]).`
-
-        will produce [fun a b c d => (a + (b + (c + d)))].*)
-        Definition chained_carries_cps {n} (p:tuple Z n) (idxs : list nat)
-                   {T} (f:tuple Z n->T) :=
-          fold_right_cps2 carry_cps p (rev idxs) f.
-
-        Definition chained_carries {n} p idxs := @chained_carries_cps n p idxs _ id.
-        Lemma chained_carries_id {n} p idxs : forall {T} f,
-            @chained_carries_cps n p idxs T f = f (chained_carries p idxs).
-        Proof using modulo_cps_id div_cps_id.
-          cbv [chained_carries_cps chained_carries]; prove_id.
-        Qed.
-        Hint Opaque chained_carries : uncps.
-        Hint Rewrite @chained_carries_id : uncps.
-
-        Lemma eval_chained_carries {n} (p:tuple Z n) idxs :
-          (forall i, In i idxs -> weight (S i) / weight i <> 0) ->
-          eval (chained_carries p idxs) = eval p.
-        Proof using Type*.
-          cbv [chained_carries chained_carries_cps]; intros;
-            autorewrite with uncps push_id.
-          apply fold_right_invariant; [|intro; rewrite <-in_rev];
-            destruct n; prove_eval; auto.
-        Qed. Hint Rewrite @eval_chained_carries : push_basesystem_eval.
-
-        Definition chained_carries_reduce_cps_step {n} (s:Z) (c:list limb) {T}
-                   (chained_carries_reduce_cps : forall (p:tuple Z n) (carry_chains : list (list nat)) (f : tuple Z n -> T), T)
-                   (p : tuple Z n) (carry_chains : list (list nat))
-                   (f : tuple Z n -> T)
-          : T
-          := match carry_chains with
-             | nil => f p
-             | carry_chain :: nil
-               => chained_carries_cps
-                    (n:=n) p carry_chain f
-             | carry_chain :: carry_chains
-               => chained_carries_cps
-                    (n:=n) p carry_chain
-                    (fun r => carry_reduce_cps (n:=n) s c r
-                    (fun r' => chained_carries_reduce_cps r' carry_chains f))
+    Lemma weight_mod_pull_div n x :
+      x mod weight (S n) / weight n =
+      (x / weight n) mod (weight (S n) / weight n).
+    Proof using weight_positive weight_multiples weight_divides.
+      replace (weight (S n)) with (weight n * (weight (S n) / weight n));
+      repeat match goal with
+             | _ => progress autorewrite with zsimplify_fast
+             | _ => rewrite Z.mul_div_eq_full by auto with zarith
+             | _ => rewrite Z.mul_div_eq' by auto with zarith
+             | _ => rewrite Z.mod_pull_div
+             | _ => rewrite weight_multiples by auto with zarith
+             | _ => solve [auto with zarith]
              end.
-        Section chained_carries_reduce_cps.
-          Context {n:nat} (s:Z) (c:list limb) {T:Type}.
+    Qed.
 
-          Fixpoint chained_carries_reduce_cps
-                   (p : tuple Z n) (carry_chains : list (list nat))
-                   (f : tuple Z n -> T)
-            : T
-            := @chained_carries_reduce_cps_step
-                 n s c T
-                 chained_carries_reduce_cps p carry_chains f.
-        End chained_carries_reduce_cps.
+    Lemma weight_div_pull_div n x :
+      x / weight (S n) =
+      (x / weight n) / (weight (S n) / weight n).
+    Proof using weight_positive weight_multiples weight_divides.
+      replace (weight (S n)) with (weight n * (weight (S n) / weight n));
+      repeat match goal with
+             | _ => progress autorewrite with zdiv_to_mod zsimplify_fast
+             | _ => rewrite Z.mul_div_eq_full by auto with zarith
+             | _ => rewrite Z.mul_div_eq' by auto with zarith
+             | _ => rewrite Z.div_div by auto with zarith
+             | _ => rewrite weight_multiples by assumption
+             | _ => solve [auto with zarith]
+             end.
+    Qed.
+  End Weight.
+End Weight.
 
-        Lemma step_chained_carries_reduce_cps {n} (s:Z) (c:list limb) {T} p carry_chain carry_chains (f : tuple Z n -> T)
-          : chained_carries_reduce_cps s c p (carry_chain :: carry_chains) f
-            = match length carry_chains with
-              | O => chained_carries_cps
-                       (n:=n) p carry_chain f
-              | S _
-                => chained_carries_cps
-                     (n:=n) p carry_chain
-                     (fun r => carry_reduce_cps (n:=n) s c r
-                     (fun r' => chained_carries_reduce_cps s c r' carry_chains f))
-              end.
-        Proof.
-          destruct carry_chains; reflexivity.
-        Qed.
+Module Positional.
+  Import Weight.
+  Section Positional.
+  Context (weight : nat -> Z)
+          (weight_0 : weight 0%nat = 1)
+          (weight_nz : forall i, weight i <> 0).
 
-        Definition chained_carries_reduce {n} (s:Z) (c:list limb) (p:tuple Z n) (carry_chains : list (list nat))
-          : tuple Z n
-          := chained_carries_reduce_cps s c p carry_chains id.
+  Definition to_associational (n:nat) (xs:list Z) : list (Z*Z)
+    := combine (map weight (List.seq 0 n)) xs.
+  Definition eval n x := Associational.eval (@to_associational n x).
+  Lemma eval_to_associational n x :
+    Associational.eval (@to_associational n x) = eval n x.
+  Proof using Type. trivial.                                             Qed.
+  Hint Rewrite @eval_to_associational : push_eval.
+  Lemma eval_nil n : eval n [] = 0.
+  Proof using Type. cbv [eval to_associational]. rewrite combine_nil_r. reflexivity. Qed.
+  Hint Rewrite eval_nil : push_eval.
+  Lemma eval0 p : eval 0 p = 0.
+  Proof using Type. cbv [eval to_associational]. reflexivity. Qed.
+  Hint Rewrite eval0 : push_eval.
 
-        Lemma chained_carries_reduce_id {n} s c {T} p carry_chains f
-          : @chained_carries_reduce_cps n s c T p carry_chains f
-            = f (@chained_carries_reduce n s c p carry_chains).
-        Proof.
-          destruct carry_chains as [|carry_chain carry_chains]; [ reflexivity | ].
-          cbv [chained_carries_reduce].
-          revert p carry_chain; induction carry_chains as [|? carry_chains IHcarry_chains]; intros.
-          { simpl; repeat autounfold; autorewrite with uncps. reflexivity. }
-          { rewrite !step_chained_carries_reduce_cps.
-            simpl @length; cbv iota beta.
-            repeat autounfold; autorewrite with uncps.
-            rewrite !IHcarry_chains.
-            reflexivity. }
-        Qed.
-        Hint Opaque chained_carries_reduce : uncps.
-        Hint Rewrite @chained_carries_reduce_id : uncps.
-
-        Lemma eval_chained_carries_reduce {n} (s:Z) (c:list limb) (p:tuple Z n) carry_chains
-              (Hn : n <> 0%nat)
-              (s_nonzero:s<>0) m (m_eq : Z.pos m = s - Associational.eval c)
-              (Hwt : weight (S (Init.Nat.pred n)) / weight (Init.Nat.pred n) <> 0)
-          : (List.fold_right
-               and
-               True
-               (List.map
-                  (fun idxs
-                   => forall i, In i idxs -> weight (S i) / weight i <> 0)
-                  carry_chains)) ->
-            mod_eq m (eval (chained_carries_reduce s c p carry_chains)) (eval p).
-        Proof using Type*.
-          destruct carry_chains as [|carry_chain carry_chains]; [ reflexivity | ].
-          cbv [chained_carries_reduce].
-          revert p carry_chain; induction carry_chains as [|? carry_chains IHcarry_chains]; intros.
-          { cbn in *; prove_eval; auto. }
-          { rewrite !step_chained_carries_reduce_cps.
-            simpl @length; cbv iota beta.
-            repeat autounfold; autorewrite with uncps push_id push_basesystem_eval.
-            cbv [chained_carries_reduce].
-            rewrite !IHcarry_chains by (cbn in *; tauto); clear IHcarry_chains.
-            cbn in * |- .
-            prove_eval; auto. }
-        Qed.
-        Hint Rewrite @eval_chained_carries_reduce using (omega || assumption) : push_basesystem_eval.
-
-        (* Reverse of [eval]; translate from Z to basesystem by putting
-        everything in first digit and then carrying. This function, like
-        [eval], is not defined using CPS. *)
-        Definition encode {n} (x : Z) : tuple Z n :=
-          chained_carries (from_associational n [(1,x)]) (seq 0 n).
-        Lemma eval_encode {n} x : (n <> 0%nat) ->
-          (forall i, In i (seq 0 n) -> weight (S i) / weight i <> 0) ->
-          eval (@encode n x) = x.
-        Proof using Type*. cbv [encode]; intros; prove_eval; auto. Qed.
-        Hint Rewrite @eval_encode : push_basesystem_eval.
-
-      End Carries.
-      Hint Unfold carry_reduce_cps.
-
-      Section Subtraction.
-        Context {m n} {coef : tuple Z n}
-                {coef_mod : mod_eq m (eval coef) 0}.
-
-        Definition sub_cps (p q : tuple Z n) {T} (f:tuple Z n->T):=
-          add_cps coef p
-            (fun cp => negate_snd_cps q
-              (fun _q => add_cps cp _q f)).
-
-        Definition sub p q := sub_cps p q id.
-        Lemma sub_id p q {T} f : @sub_cps p q T f = f (sub p q).
-        Proof using Type. cbv [sub_cps sub]; autounfold; prove_id. Qed.
-        Hint Opaque sub : uncps.
-        Hint Rewrite sub_id : uncps.
-
-        Lemma eval_sub p q : mod_eq m (eval (sub p q)) (eval p - eval q).
-        Proof using Type*.
-          cbv [sub sub_cps]; autounfold; destruct n; prove_eval.
-          transitivity (eval coef + (eval p - eval q)).
-          { apply f_equal2; ring. }
-          { cbv [mod_eq] in *; rewrite Z.add_mod_full, coef_mod, Z.add_0_l, Zmod_mod. reflexivity. }
-        Qed.
-
-        Definition opp_cps (p : tuple Z n) {T} (f:tuple Z n->T):=
-          sub_cps (zeros n) p f.
-      End Subtraction.
-
-      (* Lemmas about converting to/from F. Will be useful in proving
-      that basesystem is isomorphic to F.commutative_ring_modulo.*)
-      Section F.
-        Context {sz:nat} {sz_nonzero : sz<>0%nat} {m :positive}.
-        Context (weight_divides : forall i : nat, weight (S i) / weight i <> 0).
-        Context {modulo_cps div_cps:forall {R},Z->Z->(Z->R)->R}.
-        Let modulo x y := modulo_cps _ x y id.
-        Let div x y := div_cps _ x y id.
-        Context {modulo_cps_id : forall R x y f, modulo_cps R x y f = f (modulo x y)}
-                {div_cps_id : forall R x y f, div_cps R x y f = f (div x y)}.
-        Context {div_mod : forall a b:Z, b <> 0 ->
-                                         a = b * (div a b) + modulo a b}.
-        Hint Rewrite modulo_cps_id div_cps_id : uncps.
-
-        Definition Fencode (x : F m) : tuple Z sz :=
-          encode (div_cps:=div_cps) (modulo_cps:=modulo_cps) (F.to_Z x).
-
-        Definition Fdecode (x : tuple Z sz) : F m := F.of_Z m (eval x).
-
-        Lemma Fdecode_Fencode_id x : Fdecode (Fencode x) = x.
-        Proof using div_mod sz_nonzero weight_0 weight_divides weight_nonzero div_cps_id modulo_cps_id.
-          cbv [Fdecode Fencode]; rewrite @eval_encode by eauto.
-          apply F.of_Z_to_Z.
-        Qed.
-
-        Lemma eq_Feq_iff a b :
-          Logic.eq (Fdecode a) (Fdecode b) <-> eq m a b.
-        Proof using Type. cbv [Fdecode]; rewrite <-F.eq_of_Z_iff; reflexivity. Qed.
-      End F.
-
-
-    End Positional.
-    Hint Rewrite eval_unit eval_single : push_basesystem_eval.
-
-    (* Helper lemmas and definitions for [eval] that to be in a
-    separate section so the weight function can change. *)
-    Section EvalHelpers.
-      Lemma eval_step {n} (x:tuple Z n) : forall wt z,
-        eval wt (Tuple.append z x) = wt 0%nat * z + eval (fun i => wt (S i)) x.
-      Proof.
-        destruct n; [reflexivity|].
-        intros; cbv [eval to_associational_cps].
-        autorewrite with uncps. rewrite map_S_seq. reflexivity.
-      Qed.
-
-      Lemma eval_left_append {n} : forall wt x xs,
-          eval wt (Tuple.left_append (n:=n) x xs)
-          = wt n * x + eval wt xs.
-      Proof.
-        induction n as [|n IHn]; intros wt x xs; try destruct xs;
-          unfold Tuple.left_append; fold @Tuple.left_append;
-            autorewrite with push_basesystem_eval; [ring|].
-        rewrite (Tuple.subst_append xs), Tuple.hd_append, Tuple.tl_append.
-        rewrite !eval_step, IHn. ring.
-      Qed.
-      Hint Rewrite @eval_left_append : push_basesystem_eval.
-
-      Lemma eval_wt_equiv {n} :forall wta wtb (x:tuple Z n),
-          (forall i, wta i = wtb i) -> eval wta x = eval wtb x.
-      Proof.
-        destruct n as [|n]; [reflexivity|].
-        induction n as [|n IHn]; intros wta wtb x H; [rewrite !eval_single, H; reflexivity|].
-        simpl tuple in *; destruct x.
-        change (t, z) with (Tuple.append (n:=S n) z t).
-        rewrite !eval_step. rewrite (H 0%nat). apply Group.cancel_left.
-        apply IHn; auto.
-      Qed.
-
-      Definition eval_from {n} weight (offset:nat) (x : tuple Z n) : Z :=
-        eval (fun i => weight (i+offset)%nat) x.
-
-      Lemma eval_from_0 {n} wt x : @eval_from n wt 0 x = eval wt x.
-      Proof. cbv [eval_from]. auto using eval_wt_equiv. Qed.
-    End EvalHelpers.
-
-    Section Select.
-      Context {weight : nat -> Z}.
-
-      Definition select_cps {n} (mask cond:Z) (p:tuple Z n)
-                 {T} (f:tuple Z n->T) :=
-        dlet t := Z.zselect cond 0 mask in Tuple.map_cps (runtime_and t) p f.
-
-      Definition select {n} mask cond p := @select_cps n mask cond p _ id.
-      Lemma select_id {n} mask cond p T f :
-        @select_cps n mask cond p T f = f (select mask cond p).
-      Proof.
-        cbv [select select_cps Let_In]; autorewrite with uncps push_id;
-          reflexivity.
-      Qed.
-      Hint Opaque select : uncps.
-
-      Lemma map_and_0 {n} (p:tuple Z n) : Tuple.map (Z.land 0) p = zeros n.
-      Proof.
-        induction n as [|n IHn]; [destruct p; reflexivity | ].
-        rewrite (Tuple.subst_append p), Tuple.map_append, Z.land_0_l, IHn.
-        reflexivity.
-      Qed.
-
-      Lemma eval_select {n} mask cond x (H:Tuple.map (Z.land mask) x = x) :
-        B.Positional.eval weight (@select n mask cond x) =
-        if dec (cond = 0) then 0 else  B.Positional.eval weight x.
-      Proof.
-        cbv [select select_cps Let_In].
-        autorewrite with uncps push_id.
-        rewrite Z.zselect_correct; break_match.
-        { rewrite map_and_0. apply B.Positional.eval_zeros. }
-        {  change runtime_and with Z.land. rewrite H; reflexivity. }
-      Qed.
-
-    End Select.
-
-  End Positional.
-
-  Hint Unfold
-      Positional.add_cps
-      Positional.mul_cps
-      Positional.reduce_cps
-      Positional.carry_reduce_cps
-      Positional.negate_snd_cps
-      Positional.split_cps
-      Positional.scmul_cps
-      Positional.unbalanced_sub_cps
-      Positional.opp_cps
-  .
-  Hint Rewrite
-      @Associational.reduce_cps_id
-      @Associational.split_cps_id
-      @Associational.mul_cps_id
-      @Positional.from_associational_cps_id
-      @Positional.place_cps_id
-      @Positional.add_to_nth_cps_id
-      @Positional.to_associational_cps_id
-      @Positional.sub_id
-      @Positional.select_id
-    : uncps.
-  Hint Rewrite
-       @Associational.carry_cps_id
-       @Associational.carryterm_cps_id
-       @Positional.carry_cps_id
-       @Positional.chained_carries_id
-       @Positional.chained_carries_reduce_id
-       using div_mod_cps_t : uncps.
-  Hint Rewrite
-       @Associational.eval_mul
-       @Positional.eval_single
-       @Positional.eval_unit
-       @Positional.eval_to_associational
-       @Positional.eval_left_append
-       @Associational.eval_carry
-       @Associational.eval_carryterm
-       @Associational.eval_reduce
-       @Associational.eval_split
-       @Positional.eval_zeros
-       @Positional.eval_carry
-       @Positional.eval_from_associational
-       @Positional.eval_add_to_nth
-       @Positional.eval_chained_carries
-       @Positional.eval_chained_carries_reduce
-       @Positional.eval_sub
-       @Positional.eval_select
-       using (assumption || (div_mod_cps_t; auto) || vm_decide) : push_basesystem_eval.
-End B.
-
-(* Modulo and div that do shifts if possible, otherwise normal mod/div *)
-Section DivMod.
-  Definition modulo_cps {T} (a b : Z) (f : Z -> T) : T :=
-    Z.eqb_cps (2 ^ (Z.log2 b)) b (fun eqb =>
-    if eqb
-    then let x := (Z.ones (Z.log2 b)) in f (a &' x)%RT
-    else f (Z.modulo a b)).
-
-  Definition div_cps {T} (a b : Z) (f : Z -> T) : T :=
-    Z.eqb_cps (2 ^ (Z.log2 b)) b (fun eqb =>
-    if eqb
-    then let x := Z.log2 b in f ((a >> x)%RT)
-    else f (Z.div a b)).
-
-  Definition modulo (a b : Z) : Z := modulo_cps a b id.
-  Definition div (a b : Z) : Z := div_cps a b id.
-
-  Lemma modulo_id {T} a b f
-    : @modulo_cps T a b f = f (modulo a b).
-  Proof. cbv [modulo_cps modulo]; autorewrite with uncps; break_match; reflexivity. Qed.
-  Hint Opaque modulo : uncps.
-  Hint Rewrite @modulo_id : uncps.
-
-  Lemma div_id {T} a b f
-    : @div_cps T a b f = f (div a b).
-  Proof. cbv [div_cps div]; autorewrite with uncps; break_match; reflexivity. Qed.
-  Hint Opaque div : uncps.
-  Hint Rewrite @div_id : uncps.
-
-  Lemma div_cps_correct {T} a b f : @div_cps T a b f = f (Z.div a b).
-  Proof.
-    cbv [div_cps Z.eqb_cps]; intros. break_match; try reflexivity.
-    rewrite Z.shiftr_div_pow2 by apply Z.log2_nonneg.
-    Z.ltb_to_lt; congruence.
+  Lemma eval_snoc n m x y : n = length x -> m = S n -> eval m (x ++ [y]) = eval n x + weight n * y.
+  Proof using Type.
+    cbv [eval to_associational]; intros; subst n m.
+    rewrite seq_snoc, map_app.
+    rewrite combine_app_samelength by distr_length.
+    autorewrite with push_eval. simpl.
+    autorewrite with push_eval cancel_pair; ring.
   Qed.
 
-  Lemma modulo_cps_correct {T} a b f : @modulo_cps T a b f = f (Z.modulo a b).
-  Proof.
-    cbv [modulo_cps Z.eqb_cps]; intros. break_match; try reflexivity.
-    rewrite Z.land_ones by apply Z.log2_nonneg.
-    Z.ltb_to_lt; congruence.
+  Lemma eval_snoc_S n x y : n = length x -> eval (S n) (x ++ [y]) = eval n x + weight n * y.
+  Proof using Type. intros; erewrite eval_snoc; eauto. Qed.
+  Hint Rewrite eval_snoc_S using (solve [distr_length]) : push_eval.
+
+  (* SKIP over this: zeros, add_to_nth *)
+  Local Ltac push := autorewrite with push_eval push_map distr_length
+    push_flat_map push_fold_right push_nth_default cancel_pair natsimplify.
+  Definition zeros n : list Z := repeat 0 n.
+  Lemma length_zeros n : length (zeros n) = n. Proof using Type. clear; cbv [zeros]; distr_length. Qed.
+  Hint Rewrite length_zeros : distr_length.
+  Lemma eval_combine_zeros ls n : Associational.eval (List.combine ls (zeros n)) = 0.
+  Proof using Type.
+    clear; cbv [Associational.eval zeros].
+    revert n; induction ls, n; simpl; rewrite ?IHls; nsatz.   Qed.
+  Lemma eval_zeros n : eval n (zeros n) = 0.
+  Proof using Type. apply eval_combine_zeros.                            Qed.
+  Definition add_to_nth i x (ls : list Z) : list Z
+    := ListUtil.update_nth i (fun y => x + y) ls.
+  Lemma length_add_to_nth i x ls : length (add_to_nth i x ls) = length ls.
+  Proof using Type. clear; cbv [add_to_nth]; distr_length. Qed.
+  Hint Rewrite length_add_to_nth : distr_length.
+  Lemma eval_add_to_nth (n:nat) (i:nat) (x:Z) (xs:list Z) (H:(i<length xs)%nat)
+        (Hn : length xs = n) (* N.B. We really only need [i < Nat.min n (length xs)] *) :
+    eval n (add_to_nth i x xs) = weight i * x + eval n xs.
+  Proof using Type.
+    subst n.
+    cbv [eval to_associational add_to_nth].
+    rewrite ListUtil.combine_update_nth_r at 1.
+    rewrite <-(update_nth_id i (List.combine _ _)) at 2.
+    rewrite <-!(ListUtil.splice_nth_equiv_update_nth_update _ _
+      (weight 0, 0)) by (push; lia); cbv [ListUtil.splice_nth id].
+    repeat match goal with
+           | _ => progress push
+           | _ => progress break_match
+           | _ => progress (apply Zminus_eq; ring_simplify)
+           | _ => rewrite <-ListUtil.map_nth_default_always
+           end; lia.                                          Qed.
+  Hint Rewrite @eval_add_to_nth eval_zeros eval_combine_zeros : push_eval.
+
+  Lemma zeros_ext_map {A} n (p : list A) : length p = n -> zeros n = map (fun _ => 0) p.
+  Proof using Type. cbv [zeros]; intro; subst; induction p; cbn; congruence. Qed.
+
+  Lemma eval_mul_each (n:nat) (a:Z) (p:list Z)
+        (Hn : length p = n)
+    : eval n (List.map (fun x => a*x) p) = a*eval n p.
+  Proof using Type.
+    clear -Hn.
+    transitivity (Associational.eval (map (fun t => (1 * fst t, a * snd t)) (to_associational n p))).
+    { cbv [eval to_associational]; rewrite !combine_map_r.
+      f_equal; apply map_ext; intros; f_equal; nsatz. }
+    { rewrite Associational.eval_map_mul, eval_to_associational; nsatz. }
+  Qed.
+  Hint Rewrite eval_mul_each : push_eval.
+
+  Definition place (t:Z*Z) (i:nat) : nat * Z :=
+    nat_rect
+      (fun _ => unit -> (nat * Z)%type)
+      (fun _ => (O, fst t * snd t))
+      (fun i' place_i' _
+       => let i := S i' in
+          if (fst t mod weight i =? 0)
+          then (i, let c := fst t / weight i in c * snd t)
+          else place_i' tt)
+      i
+      tt.
+
+  Lemma place_in_range (t:Z*Z) (n:nat) : (fst (place t n) < S n)%nat.
+  Proof using Type. induction n; cbv [place nat_rect] in *; break_match; autorewrite with cancel_pair; try omega. Qed.
+  Lemma weight_place t i : weight (fst (place t i)) * snd (place t i) = fst t * snd t.
+  Proof using weight_nz weight_0. induction i; cbv [place nat_rect] in *; break_match; push;
+    repeat match goal with |- context[?a/?b] =>
+      unique pose proof (Z_div_exact_full_2 a b ltac:(auto) ltac:(auto))
+           end; nsatz.                                        Qed.
+  Hint Rewrite weight_place : push_eval.
+  Lemma weight_add_mod (weight_mul : forall i, weight (S i) mod weight i = 0) i j
+    : weight (i + j) mod weight i = 0.
+  Proof using weight_nz.
+    rewrite Nat.add_comm.
+    induction j as [|[|j] IHj]; cbn [Nat.add] in *;
+      eauto using Z_mod_same_full, Z.mod_mod_trans.
+  Qed.
+  Lemma weight_mul_iff (weight_pos : forall i, 0 < weight i) (weight_mul : forall i, weight (S i) mod weight i = 0) i j
+    : weight i mod weight j = 0 <-> ((j < i)%nat \/ forall k, (i <= k <= j)%nat -> weight k = weight j).
+  Proof using weight_nz.
+    split.
+    { destruct (dec (j < i)%nat); [ left; omega | intro H; right; revert H ].
+      assert (j = (j - i) + i)%nat by omega.
+      generalize dependent (j - i)%nat; intro jmi; intros ? H0.
+      subst j.
+      destruct jmi as [|j]; [ intros k ?; assert (k = i) by omega; subst; f_equal; omega | ].
+      induction j as [|j IH]; cbn [Nat.add] in *.
+      { intros k ?; assert (k = i \/ k = S i) by omega; destruct_head'_or; subst;
+          eauto using Z.mod_mod_0_0_eq_pos. }
+      { specialize_by omega.
+        { pose proof (weight_mul (S (j + i))) as H.
+          specialize_by eauto using Z.mod_mod_trans with omega.
+          intros k H'; destruct (dec (k = S (S (j + i)))); subst;
+            try rewrite IH by eauto using Z.mod_mod_trans with omega;
+            eauto using Z.mod_mod_trans, Z.mod_mod_0_0_eq_pos with omega.
+          rewrite (IH i) in * by omega.
+          eauto using Z.mod_mod_trans, Z.mod_mod_0_0_eq_pos with omega. } } }
+    { destruct (dec (j < i)%nat) as [H|H]; [ intros _ | intros [H'|H']; try omega ].
+      { assert (i = j + (i - j))%nat by omega.
+        generalize dependent (i - j)%nat; intro imj; intros.
+        subst i.
+        apply weight_add_mod; auto. }
+      { erewrite H', Z_mod_same_full by omega; omega. } }
+  Qed.
+  Lemma weight_div_from_pos_mul (weight_pos : forall i, 0 < weight i) (weight_mul : forall i, weight (S i) mod weight i = 0)
+    : forall i, 0 < weight (S i) / weight i.
+  Proof using weight_nz.
+    intro i; generalize (weight_mul i) (weight_mul (S i)).
+    Z.div_mod_to_quot_rem; nia.
+  Qed.
+  Lemma place_weight n (weight_pos : forall i, 0 < weight i) (weight_mul : forall i, weight (S i) mod weight i = 0)
+        (weight_unique : forall i j, (i <= n)%nat -> (j <= n)%nat -> weight i = weight j -> i = j)
+        i x
+    : (place (weight i, x) n) = (Nat.min i n, (weight i / weight (Nat.min i n)) * x).
+  Proof using weight_0 weight_nz.
+    cbv [place].
+    induction n as [|n IHn]; cbn; [ destruct i; cbn; rewrite ?weight_0; autorewrite with zsimplify_const; reflexivity | ].
+    destruct (dec (i < S n)%nat);
+      break_innermost_match; cbn [fst snd] in *; Z.ltb_to_lt; [ | rewrite IHn | | rewrite IHn ];
+        break_innermost_match;
+        rewrite ?Min.min_l in * by omega;
+        rewrite ?Min.min_r in * by omega;
+        eauto with omega.
+    { rewrite weight_mul_iff in * by auto.
+      destruct_head'_or; try omega.
+      assert (S n = i).
+      { apply weight_unique; try omega.
+        symmetry; eauto with omega. }
+      subst; reflexivity. }
+    { rewrite weight_mul_iff in * by auto.
+      exfalso; intuition eauto with omega. }
   Qed.
 
-  Definition div_correct a b : div a b = Z.div a b := div_cps_correct a b id.
-  Definition modulo_correct a b : modulo a b = Z.modulo a b := modulo_cps_correct a b id.
+  Definition from_associational n (p:list (Z*Z)) :=
+    List.fold_right (fun t ls =>
+      dlet_nd p := place t (pred n) in
+      add_to_nth (fst p) (snd p) ls ) (zeros n) p.
+  Lemma eval_from_associational n p (n_nz:n<>O \/ p = nil) :
+    eval n (from_associational n p) = Associational.eval p.
+  Proof using weight_0 weight_nz. destruct n_nz; [ induction p | subst p ];
+  cbv [from_associational Let_In] in *; push; try
+  pose proof place_in_range a (pred n); try omega; try nsatz;
+  apply fold_right_invariant; cbv [zeros add_to_nth];
+  intros; rewrite ?map_length, ?List.repeat_length, ?seq_length, ?length_update_nth;
+  try omega.                                                  Qed.
+  Hint Rewrite @eval_from_associational : push_eval.
+  Lemma length_from_associational n p : length (from_associational n p) = n.
+  Proof using Type. cbv [from_associational Let_In]. apply fold_right_invariant; intros; distr_length. Qed.
+  Hint Rewrite length_from_associational : distr_length.
 
-  Lemma div_mod a b (H:b <> 0) : a = b * div a b + modulo a b.
+  Lemma nth_default_from_associational v n p i (n_nz : n <> 0%nat) :
+    nth_default v (from_associational n p) i
+    = fold_right Z.add (nth_default v (zeros n) i)
+                 (map (fun t => dlet p : nat * Z := place t (pred n) in
+                           if dec (fst p = i) then snd p else 0) p).
   Proof.
-    rewrite div_correct, modulo_correct; auto using Z.div_mod.
+    subst; cbv [from_associational Let_In].
+    induction p as [|p ps IHps]; [ reflexivity | ]; cbn [fold_right map]; rewrite <- IHps; clear IHps.
+    cbv [add_to_nth].
+    match goal with
+    | [ |- context[place ?p ?i] ]
+      => pose proof (place_in_range p i)
+    end.
+    rewrite update_nth_nth_default_full; break_match; try omega;
+      rewrite nth_default_out_of_bounds by omega; try omega.
+    match goal with
+    | [ H : context[length (fold_right ?f ?v ?ps)] |- _ ]
+      => replace (length (fold_right f v ps)) with (length v) in H
+        by (apply fold_right_invariant; intros; distr_length; auto)
+    end.
+    distr_length; auto.
   Qed.
-End DivMod.
 
-Hint Opaque div modulo : uncps.
-Hint Rewrite @div_id @modulo_id : uncps.
+  Definition extend_to_length (n_in n_out : nat) (p:list Z) : list Z :=
+    p ++ zeros (n_out - n_in).
+  Lemma eval_extend_to_length n_in n_out p :
+    length p = n_in -> (n_in <= n_out)%nat ->
+    eval n_out (extend_to_length n_in n_out p) = eval n_in p.
+  Proof using Type.
+    cbv [eval extend_to_length to_associational]; intros.
+    replace (seq 0 n_out) with (seq 0 (n_in + (n_out - n_in))) by (f_equal; omega).
+    rewrite seq_add, map_app, combine_app_samelength, Associational.eval_app;
+      push; omega.
+  Qed.
+  Hint Rewrite eval_extend_to_length : push_eval.
+  Lemma length_extend_to_length n_in n_out p :
+    length p = n_in -> (n_in <= n_out)%nat ->
+    length (extend_to_length n_in n_out p) = n_out.
+  Proof using Type. clear; cbv [extend_to_length]; intros; distr_length.        Qed.
+  Hint Rewrite length_extend_to_length : distr_length.
 
-Import B.
+  Definition drop_high_to_length (n : nat) (p:list Z) : list Z :=
+    firstn n p.
+  Lemma length_drop_high_to_length n p :
+    length (drop_high_to_length n p) = Nat.min n (length p).
+  Proof using Type. clear; cbv [drop_high_to_length]; intros; distr_length.        Qed.
+  Hint Rewrite length_drop_high_to_length : distr_length.
 
-Create HintDb basesystem_partial_evaluation_unfolder.
+  Section mulmod.
+    Context (s:Z) (s_nz:s <> 0)
+            (c:list (Z*Z))
+            (m_nz:s - Associational.eval c <> 0).
+    Definition mulmod (n:nat) (a b:list Z) : list Z
+      := let a_a := to_associational n a in
+         let b_a := to_associational n b in
+         let ab_a := Associational.mul a_a b_a in
+         let abm_a := Associational.repeat_reduce n s c ab_a in
+         from_associational n abm_a.
+    Lemma eval_mulmod n (f g:list Z)
+          (Hf : length f = n) (Hg : length g = n) :
+      eval n (mulmod n f g) mod (s - Associational.eval c)
+      = (eval n f * eval n g) mod (s - Associational.eval c).
+    Proof using m_nz s_nz weight_0 weight_nz. cbv [mulmod]; push; trivial.
+    destruct f, g; simpl in *; [ right; subst n | left; try omega.. ].
+    clear; cbv -[Associational.repeat_reduce].
+    induction c as [|?? IHc]; simpl; trivial.                 Qed.
 
-Hint Unfold
-     id
-     Associational.eval
-     Associational.multerm
-     Associational.mul_cps
-     Associational.mul
-     Associational.split_cps
-     Associational.split
-     Associational.reduce_cps
-     Associational.reduce
-     Associational.negate_snd_cps
-     Associational.negate_snd
-     Associational.carryterm_cps
-     Associational.carryterm
-     Associational.carry_cps
-     Associational.carry
-     Positional.to_associational_cps
-     Positional.to_associational
-     Positional.eval
-     Positional.zeros
-     Positional.add_to_nth_cps
-     Positional.add_to_nth
-     Positional.place_cps
-     Positional.place
-     Positional.from_associational_cps
-     Positional.from_associational
-     Positional.carry_cps
-     Positional.carry
-     Positional.chained_carries_cps
-     Positional.chained_carries
-     Positional.chained_carries_reduce_cps_step
-     Positional.chained_carries_reduce_cps
-     Positional.chained_carries_reduce
-     Positional.encode
-     Positional.add_cps
-     Positional.mul_cps
-     Positional.reduce_cps
-     Positional.carry_reduce_cps
-     Positional.negate_snd_cps
-     Positional.split_cps
-     Positional.scmul_cps
-     Positional.unbalanced_sub_cps
-     Positional.sub_cps
-     Positional.sub
-     Positional.opp_cps
-     Positional.Fencode
-     Positional.Fdecode
-     Positional.eval_from
-     Positional.select_cps
-     Positional.select
-     modulo div modulo_cps div_cps
-     id_tuple_with_alt id_tuple'_with_alt id_tuple_with_alt_cps'
-     Z.add_get_carry_full Z.add_get_carry_full_cps
-  : basesystem_partial_evaluation_unfolder.
+    Definition squaremod (n:nat) (a:list Z) : list Z
+      := let a_a := to_associational n a in
+         let aa_a := Associational.reduce_square s c a_a in
+         let aam_a := Associational.repeat_reduce (pred n) s c aa_a in
+         from_associational n aam_a.
+    Lemma eval_squaremod n (f:list Z)
+          (Hf : length f = n) :
+      eval n (squaremod n f) mod (s - Associational.eval c)
+      = (eval n f * eval n f) mod (s - Associational.eval c).
+    Proof using m_nz s_nz weight_0 weight_nz. cbv [squaremod]; push; trivial.
+    destruct f; simpl in *; [ right; subst n; reflexivity | left; try omega.. ]. Qed.
+  End mulmod.
+  Hint Rewrite @eval_mulmod @eval_squaremod : push_eval.
 
-Hint Unfold
-     B.limb ListUtil.sum ListUtil.sum_firstn
-     CPSUtil.Tuple.mapi_with_cps CPSUtil.Tuple.mapi_with'_cps CPSUtil.flat_map_cps CPSUtil.on_tuple_cps CPSUtil.fold_right_cps2
-     Decidable.dec Decidable.dec_eq_Z
-     id_tuple_with_alt id_tuple'_with_alt id_tuple_with_alt_cps'
-     Z.add_get_carry_full Z.add_get_carry_full_cps Z.mul_split Z.mul_split_cps Z.mul_split_cps'
-  : basesystem_partial_evaluation_unfolder.
+  Definition add (n:nat) (a b:list Z) : list Z
+    := let a_a := to_associational n a in
+       let b_a := to_associational n b in
+       from_associational n (a_a ++ b_a).
+  Lemma eval_add n (f g:list Z)
+        (Hf : length f = n) (Hg : length g = n) :
+    eval n (add n f g) = (eval n f + eval n g).
+  Proof using weight_0 weight_nz. cbv [add]; push; trivial. destruct n; auto.          Qed.
+  Hint Rewrite @eval_add : push_eval.
+  Lemma length_add n f g
+        (Hf : length f = n) (Hg : length g = n) :
+    length (add n f g) = n.
+  Proof using Type. clear -Hf Hf; cbv [add]; distr_length.               Qed.
+  Hint Rewrite @length_add : distr_length.
 
+  Section Carries.
+    Definition carry n m (index:nat) (p:list Z) : list Z :=
+      from_associational
+        m (@Associational.carry (weight index)
+                                (weight (S index) / weight index)
+                                (to_associational n p)).
 
-Ltac basesystem_partial_evaluation_unfolder t :=
-  eval
-    cbv
-    delta [
-      (* this list must contain all definitions referenced by t that reference [Let_In], [runtime_add], [runtime_opp], [runtime_mul], [runtime_shr], or [runtime_and] *)
-      id
-        Positional.to_associational_cps Positional.to_associational
-        Positional.eval Positional.zeros Positional.add_to_nth_cps
-        Positional.add_to_nth Positional.place_cps Positional.place
-        Positional.from_associational_cps Positional.from_associational
-        Positional.carry_cps Positional.carry
-        Positional.chained_carries_cps Positional.chained_carries
-        Positional.chained_carries_reduce_cps
-        Positional.chained_carries_reduce
-        Positional.chained_carries_reduce_cps_step
-        Positional.sub_cps Positional.sub Positional.split_cps
-        Positional.scmul_cps Positional.unbalanced_sub_cps
-        Positional.negate_snd_cps Positional.add_cps Positional.opp_cps
-        Associational.eval Associational.multerm Associational.mul_cps
-        Associational.mul Associational.split_cps Associational.split
-        Associational.reduce_cps Associational.reduce
-        Associational.carryterm_cps Associational.carryterm
-        Associational.carry_cps Associational.carry
-        Associational.negate_snd_cps Associational.negate_snd div modulo
-        id_tuple_with_alt id_tuple'_with_alt id_tuple_with_alt_cps'
-        Z.add_get_carry_full Z.add_get_carry_full_cps
-    ] in t.
+    Lemma length_carry n m index p : length (carry n m index p) = m.
+    Proof using Type. cbv [carry]; distr_length. Qed.
+    Hint Rewrite length_carry : distr_length.
+    Lemma eval_carry n m i p: (n <> 0%nat) -> (m <> 0%nat) ->
+                              weight (S i) / weight i <> 0 ->
+      eval m (carry n m i p) = eval n p.
+    Proof using weight_0 weight_nz.
+      cbv [carry]; intros; push; [|tauto].
+      rewrite @Associational.eval_carry by eauto.
+      apply eval_to_associational.
+    Qed. Hint Rewrite @eval_carry : push_eval.
 
-Ltac pattern_strip t :=
-  let t := (eval pattern @Let_In,
-            @runtime_mul, @runtime_add, @runtime_opp, @runtime_shr, @runtime_and, @runtime_lor,
-            @id_with_alt,
-            @Z.add_get_carry, @Z.zselect
-             in t) in
-  let t := match t with ?t _ _ _ _ _ _ _ _ _ _ => t end in
-  t.
+    (** TODO: figure out a way to make this proof shorter and faster *)
+    Lemma nth_default_carry upper n m index p
+      (weight_mul : forall i, weight (S i) mod weight i = 0)
+      (weight_pos : forall i, 0 < weight i)
+      (weight_unique : forall i j, (i <= upper)%nat -> (j <= upper)%nat -> weight i = weight j -> i = j)
+      (Hn : (n <= upper)%nat)
+      (Hm : (0 < m <= upper)%nat)
+      (Hnm : (n <= m)%nat)
+      (Hidx : (index <= upper)%nat) :
+      length p = n ->
+      forall i, nth_default 0 (carry n m index p) i
+           = if dec (m <= i)%nat
+             then 0
+             else if dec (i = S index)
+                  then nth_default 0 p i + ((nth_default 0 p index) / (weight (S index) / weight index))
+                  else if dec (i = index)
+                       then if dec (S index <> n \/ n <> m)
+                            then ((nth_default 0 p i) mod (weight (S index) / weight index))
+                            else nth_default 0 p i
+                       else nth_default 0 p i.
+    Proof using weight_0 weight_nz.
+      assert (weight_unique_iff : forall i j, (i <= upper)%nat -> (j <= upper)%nat -> weight i = weight j <-> i = j)
+        by (split; subst; auto).
+      pose proof (weight_div_from_pos_mul weight_pos weight_mul) as weight_div_pos.
+      assert (weight_div_nz : forall i, weight (S i) / weight i <> 0) by (intro i; specialize (weight_div_pos i); omega).
+      intro; subst.
+      intro i.
+      destruct (dec (m <= i)%nat) as [Hmi|Hmi];
+        [ rewrite (@nth_default_out_of_bounds _ i (carry _ _ _ _)) by (distr_length; omega); reflexivity | ].
+      cbv [carry to_associational Associational.carry Let_In Associational.carryterm].
+      rewrite combine_map_l, flat_map_map; cbn [fst snd].
+      rewrite nth_default_from_associational, map_flat_map by omega; cbn [map].
+      cbv [zeros]; rewrite nth_default_repeat.
+      replace (if (dec (i < m)%nat) then 0 else 0) with 0 by (break_match; reflexivity).
+      set (init := 0) at 1.
+      lazymatch goal with |- ?LHS = ?RHS => rewrite <- (Z.add_0_l RHS : init + RHS = RHS) end.
+      clearbody init.
+      revert Hn i init Hmi Hnm Hidx.
+      rewrite <- (rev_involutive p); generalize (rev p); clear p; intro p; rewrite rev_length.
+      induction p as [|p ps IHps]; cbn [length]; intros Hn i init Hmi Hnm Hidx.
+      { cbn; cbv [zeros]; break_innermost_match; cbn;
+          rewrite ?nth_default_repeat, ?nth_default_nil; break_innermost_match; autorewrite with zsimplify_const; reflexivity. }
+      { specialize_by omega.
+        rewrite seq_snoc, rev_cons, combine_app_samelength by distr_length.
+        rewrite flat_map_app, fold_right_app, IHps by omega; clear IHps.
+        cbn [combine fold_right fst snd flat_map map].
+        rewrite Nat.add_0_l.
+        cbv [Let_In]; cbn [fst snd].
+        rewrite ?nth_default_app; distr_length.
+        destruct (dec (i = index)), (dec (i = S index)); try (subst; omega).
+        { all:subst; break_innermost_match; Z.ltb_to_lt;
+            match goal with
+            | [ H : context[weight ?x = weight ?y] |- _ ] => rewrite (weight_unique_iff x y) in H by omega
+            end; destruct_head'_or; try (subst; omega).
+          all:repeat first [ progress cbn [fst snd app map fold_right]
+                           | progress Z.ltb_to_lt
+                           | progress subst
+                           | progress destruct_head'_or
+                           | progress rewrite ?Z.mul_div_eq_full, ?weight_mul, ?Z.sub_0_r by eauto with omega
+                           | progress rewrite ?place_weight by eauto with omega
+                           | rewrite !Nat.sub_diag
+                           | rewrite !Min.min_l by omega
+                           | rewrite !nth_default_cons
+                           | rewrite Z.div_same by eauto with omega
+                           | progress break_innermost_match
+                           | progress autorewrite with zsimplify_const
+                           | lia
+                           | match goal with
+                             | [ H : context[weight ?x = weight ?y] |- _ ] => rewrite (weight_unique_iff x y) in H by omega
+                             | [ |- context[nth_default ?d ?ls ?i] ] => rewrite (@nth_default_out_of_bounds _ i ls d) by (distr_length; omega)
+                             | [ H : ?x = ?x |- _ ] => clear H
+                             end
+                           | progress handle_min_max_for_omega_case ]. }
+        { subst; break_innermost_match; Z.ltb_to_lt;
+            match goal with
+            | [ H : context[weight ?x = weight ?y] |- _ ] => rewrite (weight_unique_iff x y) in H by omega
+            end; destruct_head'_or; try (subst; omega).
+          all:repeat first [ progress cbn [fst snd app map fold_right]
+                           | progress Z.ltb_to_lt
+                           | progress subst
+                           | progress destruct_head'_or
+                           | progress rewrite ?Z.mul_div_eq_full, ?weight_mul, ?Z.sub_0_r by eauto with omega
+                           | progress rewrite ?place_weight by eauto with omega
+                           | rewrite !Nat.sub_diag
+                           | rewrite !Min.min_l by omega
+                           | rewrite !nth_default_cons
+                           | rewrite Z.div_same by eauto with omega
+                           | progress break_innermost_match
+                           | progress autorewrite with zsimplify_const
+                           | lia
+                           | match goal with
+                             | [ H : context[weight ?x = weight ?y] |- _ ] => rewrite (weight_unique_iff x y) in H by omega
+                             | [ |- context[nth_default ?d ?ls ?i] ] => rewrite (@nth_default_out_of_bounds _ i ls d) by (distr_length; omega)
+                             | [ H : ?x = ?x |- _ ] => clear H
+                             end
+                           | progress handle_min_max_for_omega_case ]. }
+        { subst; break_innermost_match; Z.ltb_to_lt;
+            match goal with
+            | [ H : context[weight ?x = weight ?y] |- _ ] => rewrite (weight_unique_iff x y) in H by omega
+            end; destruct_head'_or; try (subst; omega).
+          all:repeat first [ progress cbn [fst snd app map fold_right]
+                           | progress Z.ltb_to_lt
+                           | progress subst
+                           | progress destruct_head'_or
+                           | progress rewrite ?Z.mul_div_eq_full, ?weight_mul, ?Z.sub_0_r by eauto with omega
+                           | progress rewrite ?place_weight by eauto with omega
+                           | rewrite !Nat.sub_diag
+                           | rewrite !Min.min_l by omega
+                           | rewrite !nth_default_cons
+                           | rewrite Z.div_same by eauto with omega
+                           | progress break_innermost_match
+                           | progress autorewrite with zsimplify_const
+                           | lia
+                           | match goal with
+                             | [ H : context[weight ?x = weight ?y] |- _ ] => rewrite (weight_unique_iff x y) in H by omega
+                             | [ |- context[nth_default ?d ?ls ?i] ] => rewrite (@nth_default_out_of_bounds _ i ls d) by (distr_length; omega)
+                             | [ H : ?x = ?x |- _ ] => clear H
+                             end
+                           | progress handle_min_max_for_omega_case ]. } }
+    Qed.
 
-Ltac apply_patterned t1 :=
-  constr:(t1
-            (@Let_In)
-            (@runtime_mul)
-            (@runtime_add)
-            (@runtime_opp)
-            (@runtime_shr)
-            (@runtime_and)
-            (@runtime_lor)
-            (@id_with_alt)
-            (@Z.add_get_carry)
-            (@Z.zselect)).
+    Definition carry_reduce n (s:Z) (c:list (Z * Z))
+               (index:nat) (p : list Z) :=
+      from_associational
+        n (Associational.reduce
+             s c (to_associational (S n) (@carry n (S n) index p))).
 
-Ltac pattern_strip_full t :=
-  let t := (eval pattern
-                 (@Let_In Z (fun _ => Z)),
-            @Z.add_get_carry_cps, @Z.mul_split_at_bitwidth_cps,
-            (@Z.eq_dec_cps), (@Z.eqb_cps),
-            @runtime_mul, @runtime_add, @runtime_opp, @runtime_shr, @runtime_and, @runtime_lor,
-            (@id_with_alt Z),
-            @Z.add_get_carry, @Z.zselect, @Z.mul_split_at_bitwidth,
-            Z.mul, Z.add, Z.opp, Z.shiftr, Z.shiftl, Z.land, Z.lor,
-            Z.modulo, Z.div, Z.log2, Z.pow, Z.ones,
-            Z.eq_dec, Z.eqb,
-            (@ModularArithmetic.F.to_Z), (@ModularArithmetic.F.of_Z),
-            2%Z, 1%Z, 0%Z
-             in t) in
-  let t := match t with ?t
-                         _
-                         _ _
-                         _ _
-                         _ _ _ _ _ _
-                         _
-                         _ _ _
-                         _ _ _ _ _ _ _
-                         _ _ _ _ _
-                         _ _
-                         _ _
-                         _ _ _ => t end in
-  let t := (eval pattern Z, (@Let_In), (@id_with_alt) in t) in
-  let t := match t with ?t _ _ _ => t end in
-  t.
+    Lemma eval_carry_reduce n s c index p :
+      (s <> 0) -> (s - Associational.eval c <> 0) -> (n <> 0%nat) ->
+      (weight (S index) / weight index <> 0) ->
+      eval n (carry_reduce n s c index p) mod (s - Associational.eval c)
+      = eval n p mod (s - Associational.eval c).
+    Proof using weight_0 weight_nz. cbv [carry_reduce]; intros; push; auto.            Qed.
+    Hint Rewrite @eval_carry_reduce : push_eval.
+    Lemma length_carry_reduce n s c index p
+      : length p = n -> length (carry_reduce n s c index p) = n.
+    Proof using Type. cbv [carry_reduce]; distr_length.                  Qed.
+    Hint Rewrite @length_carry_reduce : distr_length.
 
-Ltac apply_patterned_full t1 :=
-  constr:(t1
-            Z
-            (@Let_In) (@id_with_alt)
-            (@Let_In Z (fun _ => Z))
-            (@Z.add_get_carry_cps) (@Z.mul_split_at_bitwidth_cps)
-            (@Z.eq_dec_cps) (@Z.eqb_cps)
-            (@runtime_mul) (@runtime_add) (@runtime_opp) (@runtime_shr) (@runtime_and) (@runtime_lor)
-            (@id_with_alt Z)
-            (@Z.add_get_carry) (@Z.zselect) (@Z.mul_split_at_bitwidth)
-            Z.mul Z.add Z.opp Z.shiftr Z.shiftl Z.land Z.lor
-            Z.modulo Z.div Z.log2 Z.pow Z.ones
-            Z.eq_dec Z.eqb
-            (@ModularArithmetic.F.to_Z) (@ModularArithmetic.F.of_Z)
-            2%Z 1%Z 0%Z).
+    (* N.B. It is important to reverse [idxs] here, because fold_right is
+      written such that the first terms in the list are actually used
+      last in the computation. For example, running:
 
-Ltac basesystem_partial_evaluation_gen unfold_tac t t1 :=
-  let t := unfold_tac t in
-  let t := pattern_strip t in
-  let dummy := match goal with _ => pose t as t1 end in
-  let t1' := apply_patterned t1 in
-  t1'.
+      `Eval cbv - [Z.add] in (fun a b c d => fold_right Z.add d [a;b;c]).`
 
-Ltac basesystem_partial_evaluation_RHS_gen unfold_tac :=
-  let t := match goal with |- _ _ ?t => t end in
-  let t1 := fresh "t1" in
-  let t1' := basesystem_partial_evaluation_gen unfold_tac t t1 in
-  transitivity t1';
-  [replace_with_vm_compute t1; clear t1|reflexivity].
+      will produce [fun a b c d => (a + (b + (c + d)))].*)
+    Definition chained_carries n s c p (idxs : list nat) :=
+      fold_right (fun a b => carry_reduce n s c a b) p (rev idxs).
 
-Ltac basesystem_partial_evaluation_default_unfolder t :=
-  basesystem_partial_evaluation_unfolder t.
+    Lemma eval_chained_carries n s c p idxs :
+      (s <> 0) -> (s - Associational.eval c <> 0) -> (n <> 0%nat) ->
+      (forall i, In i idxs -> weight (S i) / weight i <> 0) ->
+      eval n (chained_carries n s c p idxs) mod (s - Associational.eval c)
+      = eval n p mod (s - Associational.eval c).
+    Proof using Type*.
+      cbv [chained_carries]; intros; push.
+      apply fold_right_invariant; [|intro; rewrite <-in_rev];
+        destruct n; intros; push; auto.
+    Qed. Hint Rewrite @eval_chained_carries : push_eval.
+    Lemma length_chained_carries n s c p idxs
+      : length p = n -> length (@chained_carries n s c p idxs) = n.
+    Proof using Type.
+      intros; cbv [chained_carries]; induction (rev idxs) as [|x xs IHxs];
+        cbn [fold_right]; distr_length.
+    Qed. Hint Rewrite @length_chained_carries : distr_length.
 
-Ltac basesystem_partial_evaluation_RHS :=
-  basesystem_partial_evaluation_RHS_gen basesystem_partial_evaluation_default_unfolder.
-Ltac basesystem_partial_evaluation :=
-  basesystem_partial_evaluation_gen basesystem_partial_evaluation_default_unfolder.
+    (* carries without modular reduction; useful for converting between bases *)
+    Definition chained_carries_no_reduce n p (idxs : list nat) :=
+      fold_right (fun a b => carry n n a b) p (rev idxs).
+    Lemma eval_chained_carries_no_reduce n p idxs:
+      (forall i, In i idxs -> weight (S i) / weight i <> 0) ->
+      eval n (chained_carries_no_reduce n p idxs) = eval n p.
+    Proof using weight_0 weight_nz.
+      cbv [chained_carries_no_reduce]; intros.
+      destruct n; [push;reflexivity|].
+      apply fold_right_invariant; [|intro; rewrite <-in_rev];
+        intros; push; auto.
+    Qed. Hint Rewrite @eval_chained_carries_no_reduce : push_eval.
+    Lemma length_chained_carries_no_reduce n p idxs
+      : length p = n -> length (@chained_carries_no_reduce n p idxs) = n.
+    Proof using Type.
+      intros; cbv [chained_carries_no_reduce]; induction (rev idxs) as [|x xs IHxs];
+        cbn [fold_right]; distr_length.
+    Qed. Hint Rewrite @length_chained_carries_no_reduce : distr_length.
+    (** TODO: figure out a way to make this proof shorter and faster *)
+    Lemma nth_default_chained_carries_no_reduce_app n m inp1 inp2
+          (weight_mul : forall i, weight (S i) mod weight i = 0)
+          (weight_pos : forall i, 0 < weight i)
+          (weight_div : forall i : nat, 0 < weight (S i) / weight i)
+          (weight_unique : forall i j, (i <= n)%nat -> (j <= n)%nat -> weight i = weight j -> i = j) :
+      length inp1 = m -> (length inp1 + length inp2 = n)%nat
+      -> (List.length inp2 <> 0%nat \/ 0 <= eval m inp1 < weight m)
+      -> forall i,
+          nth_default 0 (chained_carries_no_reduce n (inp1 ++ inp2) (seq 0 m)) i
+          = if dec (i < m)%nat
+            then ((eval m inp1) mod weight (S i)) / weight i
+            else if dec (i = m)
+                 then match inp2 with
+                      | nil => 0
+                      | cons x xs
+                        =>  x + (eval m inp1) / weight m
+                      end
+                 else nth_default 0 inp2 (i - m).
+    Proof using weight_0 weight_nz.
+      intro; subst m.
+      rewrite <- (rev_involutive inp1); generalize (List.rev inp1); clear inp1; intro inp1; rewrite rev_length.
+      revert inp2; induction inp1 as [|x xs IHxs]; intros.
+      { destruct inp2; cbn; autorewrite with zsimplify_const; intros; destruct i; reflexivity. }
+      destruct (lt_dec i n);
+        [
+        | break_match; cbn [List.length] in *; try lia;
+          rewrite ?nth_default_out_of_bounds by (repeat autorewrite with distr_length; lia);
+          reflexivity ].
+      cbv [chained_carries_no_reduce] in *.
+      repeat first [ progress cbn [List.length List.app List.rev fold_right] in *
+                   | reflexivity
+                   | assumption
+                   | progress intros
+                   | rewrite <- List.app_assoc
+                   | rewrite seq_snoc
+                   | rewrite rev_unit
+                   | rewrite Nat.add_0_l
+                   | rewrite eval_snoc_S in * by distr_length
+                   | rewrite app_length
+                   | rewrite rev_length
+                   | erewrite nth_default_carry; try eassumption
+                   | rewrite !IHxs; clear IHxs
+                   | lia
+                   | match goal with
+                     | [ |- length (fold_right _ ?p (rev ?idxs)) = ?n ]
+                       => apply (length_chained_carries_no_reduce n p idxs)
+                     | [ |- context[_ mod weight (S ?n) / weight ?n] ]
+                       => rewrite (Z.div_mod' (weight (S n)) (weight n)), weight_mul, Z.add_0_r, <- Z.mod_pull_div, ?Z.div_mul, ?Z.div_add', ?Z.mul_div_eq', ?weight_mul, ?Z.sub_0_r
+                         by solve [ assumption
+                                  | now apply Z.lt_le_incl, weight_div
+                                  | now apply Z.lt_gt, weight_pos
+                                  | (idtac + symmetry); now apply Z.lt_neq, weight_pos ]
+                     | [ |- context[?x + ?y] ]
+                       => match goal with
+                          | [ |- context[y + x] ]
+                            => progress replace (y + x) with (x + y) by lia
+                          end
+                     end ].
+      break_match; try (exfalso; lia).
+      all: repeat first [ rewrite nth_default_app
+                        | rewrite nth_default_carry
+                        | rewrite Nat.sub_diag
+                        | rewrite minus_S_diag
+                        | rewrite Nat.sub_succ_r
+                        | rewrite nth_default_cons
+                        | rewrite nth_default_cons_S
+                        | progress subst
+                        | now apply weight_0
+                        | now apply weight_mul
+                        | now apply weight_pos
+                        | reflexivity
+                        | progress intros
+                        | (idtac + symmetry); now apply Z.lt_neq, weight_pos
+                        | rewrite Z.div_add' by ((idtac + symmetry); now apply Z.lt_neq, weight_pos)
+                        | progress destruct_head'_and
+                        | progress destruct_head'_or
+                        | progress cbn [List.length] in *
+                        | match goal with
+                          | [ |- context[?x + ?y] ]
+                            => match goal with
+                               | [ |- context[y + x] ]
+                                 => progress replace (y + x) with (x + y) by lia
+                               end
+                          | [ H : List.length ?x = 0%nat |- _ ] => is_var x; destruct x
+                          | [ H : not (or _ _) |- _ ] => apply Decidable.not_or in H
+                          | [ H : ?x = ?x |- _ ] => clear H
+                          | [ H : not (?x < ?x) |- _ ] => clear H
+                          | [ H : not (?x < ?x)%nat |- _ ] => clear H
+                          | [ H : not (S ?x < ?x)%nat |- _ ] => clear H
+                          | [ H : ~(S ?x + _ <= ?x)%nat |- _ ] => clear H
+                          | [ H : (?x < S ?x + _)%nat |- _ ] => clear H
+                          | [ H : ?x <> S ?x |- _ ] => clear H
+                          | [ H : ?x <> (?x + ?y)%nat |- _ ] => assert (0 < y)%nat by lia; clear H
+                          | [ H : (?x < ?x + ?y)%nat |- _ ] => assert (0 < y)%nat by lia; clear H
+                          | [ H : ~(?x + ?y <= ?x)%nat |- _ ] => assert (0 < y)%nat by lia; clear H
+                          | [ H : ~(?x <> ?y) |- _ ] => assert (x = y) by lia; clear H
+                          | [ H : (?x = ?x + ?y)%nat |- _ ] => assert (y = 0%nat) by lia; clear H
+                          | [ H : ~(?x <= ?y)%nat |- _ ] => assert (y < x)%nat by lia; clear H
+                          | [ H : ~(?x < ?y)%nat |- _ ] => assert (y <= x)%nat by lia; clear H
+                          | [ H : (?x <= ?y)%nat, H' : ?x <> ?y |- _ ] => assert (x < y)%nat by lia; clear H H'
+                          | [ H : (?x <= ?y)%nat, H' : ?y <> ?x |- _ ] => assert (x < y)%nat by lia; clear H H'
+                          | [ H : (?x < ?y)%nat |- context[nth_default _ _ (?y - ?x)] ]
+                            => destruct (y - x)%nat eqn:?
+                          | [ |- context[nth_default _ (_ :: _) ?n] ] => is_var n; destruct n
+                          | [ H : ?T, H' : ?T |- _ ] => clear H'
+                          | [ |- (?x + ?y) mod ?z = (?y + ?x) mod ?z ] => apply f_equal2
+                          | [ |- ?x + _ = ?x + _ ] => apply f_equal
+                          | [ H0 : 0 <= ?e + ?w * ?x, H1 : ?e + ?w * ?x < ?w'
+                              |- ?x + ?e / ?w = (?x + ?e / ?w) mod (?w' / ?w) ]
+                            => rewrite (Z.mod_small (x + e / w) (w' / w))
+                          | [ H : (?i < ?n)%nat |- context[(_ + weight ?n * _) / weight ?i] ]
+                            => rewrite (Z.div_mod (weight n) (weight (S i))), weight_multiples_full, Z.add_0_r,
+                               (Z.div_mod (weight (S i)) (weight i)), weight_mul, Z.add_0_r,
+                               <- !Z.mul_assoc, Z.div_add', ?Z.div_mul', ?Z.mul_div_eq_full, ?weight_mul, ?Z.sub_0_r
+                              by solve [ assumption
+                                       | now apply Z.lt_le_incl, weight_div
+                                       | now apply Z.lt_gt, weight_pos
+                                       | now apply Nat.lt_le_incl
+                                       | (idtac + symmetry); now apply Z.lt_neq, weight_pos ];
+                               push_Zmod; pull_Zmod
+                          end
+                        | progress autorewrite with distr_length in *
+                        | lia
+                        | progress autorewrite with zsimplify_const
+                        | break_innermost_match_step
+                        | match goal with
+                          | [ |- context[weight (S ?n) / weight ?n] ]
+                            => unique pose proof (@weight_mul n)
+                          end
+                        | Z.div_mod_to_quot_rem; nia ].
+    Qed.
 
+    Lemma nth_default_chained_carries_no_reduce n inp
+          (weight_mul : forall i, weight (S i) mod weight i = 0)
+          (weight_pos : forall i, 0 < weight i)
+          (weight_div : forall i : nat, 0 < weight (S i) / weight i)
+          (weight_unique : forall i j, (i <= n)%nat -> (j <= n)%nat -> weight i = weight j -> i = j) :
+      length inp = n -> 0 <= eval n inp < weight n
+      -> forall i,
+          nth_default 0 (chained_carries_no_reduce n inp (seq 0 n)) i
+          = ((eval n inp) mod weight (S i)) / weight i.
+    Proof using weight_0 weight_nz.
+      pose proof (weight_divides_full weight ltac:(assumption) ltac:(assumption)) as weight_div_full.
+      pose proof (weight_multiples_full weight ltac:(assumption) ltac:(assumption)) as weight_mul_full.
+      assert (weight_le_full : forall j i, (i <= j)%nat -> weight i <= weight j)
+        by (intros j i pf; specialize (weight_div_full j i pf); specialize (weight_mul_full j i pf); Z.div_mod_to_quot_rem; nia).
+      intros ? ? i.
+      pose proof (weight_le_full (S n) n ltac:(lia)).
+      pose proof (weight_le_full (S i) i ltac:(lia)).
+      pose proof (weight_le_full i n).
+      intros; rewrite <- (app_nil_r inp).
+      rewrite (@nth_default_chained_carries_no_reduce_app n n inp nil), app_nil_r by (cbn [List.length]; auto with lia).
+      break_innermost_match; try reflexivity; rewrite ?nth_default_nil.
+      all: rewrite Z.mod_small by lia.
+      all: rewrite Z.div_small by lia.
+      all: reflexivity.
+    Qed.
 
-(** This block of tactic code works around bug #5434
-    (https://coq.inria.fr/bugs/show_bug.cgi?id=5434), that
-    [vm_compute] breaks an invariant in pretyping/constr_matching.ml.
-    So we refresh all of the names in match statements in the goal by
-    crawling it.
+    Lemma nth_default_chained_carries_no_reduce_pred n inp
+          (weight_mul : forall i, weight (S i) mod weight i = 0)
+          (weight_pos : forall i, 0 < weight i)
+          (weight_div : forall i : nat, 0 < weight (S i) / weight i)
+          (weight_unique : forall i j, (i <= n)%nat -> (j <= n)%nat -> weight i = weight j -> i = j) :
+      length inp = n -> 0 <= eval n inp < weight n
+      -> forall i,
+          nth_default 0 (chained_carries_no_reduce n inp (seq 0 (pred n))) i
+          = ((eval n inp) mod weight (S i)) / weight i.
+    Proof using weight_0 weight_nz.
+      pose proof (weight_divides_full weight ltac:(assumption) ltac:(assumption)) as weight_div_full.
+      pose proof (weight_multiples_full weight ltac:(assumption) ltac:(assumption)) as weight_mul_full.
+      assert (weight_le_full : forall j i, (i <= j)%nat -> weight i <= weight j)
+        by (intros j i pf; specialize (weight_div_full j i pf); specialize (weight_mul_full j i pf); Z.div_mod_to_quot_rem; nia).
+      destruct n as [|n]; [ now apply nth_default_chained_carries_no_reduce | ].
+      intros ? ? i.
+      pose proof (weight_le_full (S n) n ltac:(lia)).
+      pose proof (weight_le_full (S i) i ltac:(lia)).
+      pose proof (weight_le_full i n).
+      pose proof (weight_le_full (S i) (S n)).
+      pose proof (weight_le_full i (S n)).
+      cbn [pred].
+      revert dependent inp; intro inp.
+      rewrite <- (rev_involutive inp); generalize (rev inp); clear inp; intro inp.
+      rewrite rev_length; intros.
+      destruct inp as [|x inp]; cbn [List.length List.rev] in *; [ lia | ].
+      rewrite (@nth_default_chained_carries_no_reduce_app (S n) n (List.rev inp) (x::nil)) by (cbn [List.length]; autorewrite with distr_length; auto with lia).
+      rewrite eval_snoc_S in * by distr_length.
+      break_innermost_match; try reflexivity.
+      all: repeat first [ progress autorewrite with zsimplify_const
+                        | reflexivity
+                        | progress Z.rewrite_mod_small
+                        | rewrite Z.div_add' by ((idtac + symmetry); now apply Z.lt_neq, weight_pos)
+                        | lia
+                        | match goal with
+                          | [ |- context[_ mod weight (S ?n) / weight ?n] ]
+                            => rewrite (Z.div_mod' (weight (S n)) (weight n)), weight_mul, Z.add_0_r, <- Z.mod_pull_div, ?Z.div_mul, ?Z.div_add', ?Z.mul_div_eq', ?weight_mul, ?Z.sub_0_r
+                              by solve [ assumption
+                                       | now apply Z.lt_le_incl, weight_div
+                                       | now apply Z.lt_gt, weight_pos
+                                       | (idtac + symmetry); now apply Z.lt_neq, weight_pos ]
+                          | [ |- context[(_ + weight ?n * _) / weight ?i] ]
+                            => rewrite (Z.div_mod (weight n) (weight (S i))), weight_multiples_full, Z.add_0_r,
+                               (Z.div_mod (weight (S i)) (weight i)), weight_mul, Z.add_0_r,
+                               <- !Z.mul_assoc, Z.div_add', ?Z.div_mul', ?Z.mul_div_eq_full, ?weight_mul, ?Z.sub_0_r
+                              by solve [ assumption
+                                       | now apply Z.lt_le_incl, weight_div
+                                       | now apply Z.lt_gt, weight_pos
+                                       | now apply Nat.lt_le_incl
+                                       | (idtac + symmetry); now apply Z.lt_neq, weight_pos ];
+                               push_Zmod; pull_Zmod
+                          end
+                        | rewrite nth_default_cons
+                        | rewrite nth_default_cons_S
+                        | rewrite nth_default_nil
+                        | rewrite Z.div_small by lia
+                        | lia
+                        | match goal with
+                          | [ H : ~(?x < ?y)%nat |- _ ] => assert (y <= x)%nat by lia; clear H
+                          | [ H : (?x <= ?y)%nat, H' : ?x <> ?y |- _ ] => assert (x < y)%nat by lia; clear H H'
+                          | [ H : (?x <= ?y)%nat, H' : ?y <> ?x |- _ ] => assert (x < y)%nat by lia; clear H H'
+                          | [ H : (?x < ?y)%nat |- context[nth_default _ _ (?y - ?x)] ]
+                            => destruct (y - x)%nat eqn:?
+                          end ].
+    Qed.
 
-    In particular, [replace_with_vm_compute] creates a [vm_compute]d
-    term which has anonymous binders where pretyping expects there to
-    be named binders.  This shows up when you try to match on the
-    function (the branch statement of the match) with an Ltac pattern
-    like [(fun x : ?T => ?C)] rather than [(fun x : ?T => @?C x)]; we
-    use the former in reification to save the cost of many extra
-    invocations of [cbv beta].  Luckily, patterns like [(fun x : ?T =>
-    @?C x)] don't trigger this anomaly, so we can walk the term,
-    fixing all match statements whose branches are functions whose
-    binder names were eaten by [vm_compute] (note that in a match,
-    every branch where the corresponding constructor takes arguments
-    is represented internally as a function (lambda term)).  We fix
-    the match statements by pulling out the branch with the [@?]
-    pattern that doesn't trigger the anomaly, and then recreating the
-    match with a destructuring [let] that hasn't been through
-    [vm_compute], and therefore has name information that
-    constr_matching is happy with. *)
-Ltac replace_match_with_destructuring_match T :=
-  match T with
-  | ?F ?X
-    => let F' := replace_match_with_destructuring_match F in
-       let X' := replace_match_with_destructuring_match X in
-       constr:(F' X')
-  (* we must use [@?f a b] here and not [?f], or else we get an anomaly *)
-  | match ?d with pair a b => @?f a b end
-    => let d' := replace_match_with_destructuring_match d in
-       let T' := fresh in
-       constr:(let '(a, b) := d' in
-               match f a b with
-               | T' => ltac:(let v := (eval cbv beta delta [T'] in T') in
-                             let v := replace_match_with_destructuring_match v in
-                             exact v)
-               end)
-  | (fun a : ?A => @?f a)
-    => let T' := fresh in
-       let T' := fresh T' in
-       let T' := fresh T' in
-       constr:(fun a : A
-               => match f a with
-                  | T' => ltac:(let v := (eval cbv beta delta [T'] in T') in
-                                let v := replace_match_with_destructuring_match v in
-                                exact v)
-                  end)
-  | ?x => x
-  end.
-Ltac do_replace_match_with_destructuring_match_in_goal :=
-  let G := get_goal in
-  let G' := replace_match_with_destructuring_match G in
-  change G'.
+    (* Reverse of [eval]; translate from Z to basesystem by putting
+    everything in first digit and then carrying. *)
+    Definition encode n s c (x : Z) : list Z :=
+      chained_carries n s c (from_associational n [(1,x)]) (seq 0 n).
+    Lemma eval_encode n s c x :
+      (s <> 0) -> (s - Associational.eval c <> 0) -> (n <> 0%nat) ->
+      (forall i, In i (seq 0 n) -> weight (S i) / weight i <> 0) ->
+      eval n (encode n s c x) mod (s - Associational.eval c)
+      = x mod (s - Associational.eval c).
+    Proof using Type*. cbv [encode]; intros; push; auto; f_equal; omega. Qed.
+    Lemma length_encode n s c x
+      : length (encode n s c x) = n.
+    Proof using Type. cbv [encode]; repeat distr_length.                 Qed.
 
-(* TODO : move *)
-Lemma F_of_Z_opp {m} x : F.of_Z m (- x) = F.opp (F.of_Z m x).
-Proof.
-  cbv [F.opp]; intros. rewrite F.to_Z_of_Z, <-Z.sub_0_l.
-  etransitivity; rewrite F.of_Z_mod;
-    [rewrite Z.opp_mod_mod|]; reflexivity.
-Qed.
+    (* Reverse of [eval]; translate from Z to basesystem by putting
+    everything in first digit and then carrying, but without reduction. *)
+    Definition encode_no_reduce n (x : Z) : list Z :=
+      chained_carries_no_reduce n (from_associational n [(1,x)]) (seq 0 n).
+    Lemma eval_encode_no_reduce n x :
+      (n <> 0%nat) ->
+      (forall i, In i (seq 0 n) -> weight (S i) / weight i <> 0) ->
+      eval n (encode_no_reduce n x) = x.
+    Proof using Type*. cbv [encode_no_reduce]; intros; push; auto; f_equal; omega. Qed.
+    Lemma length_encode_no_reduce n x
+      : length (encode_no_reduce n x) = n.
+    Proof using Type. cbv [encode_no_reduce]; repeat distr_length.                 Qed.
 
-Hint Rewrite <-@F.of_Z_add : pull_FofZ.
-Hint Rewrite <-@F.of_Z_mul : pull_FofZ.
-Hint Rewrite <-@F.of_Z_sub : pull_FofZ.
-Hint Rewrite <-@F_of_Z_opp : pull_FofZ.
+  End Carries.
+  Hint Rewrite @eval_encode @eval_encode_no_reduce @eval_carry @eval_carry_reduce @eval_chained_carries @eval_chained_carries_no_reduce : push_eval.
+  Hint Rewrite @length_encode @length_encode_no_reduce @length_carry @length_carry_reduce @length_chained_carries @length_chained_carries_no_reduce : distr_length.
 
-Ltac F_mod_eq :=
-  cbv [Positional.Fdecode]; autorewrite with pull_FofZ;
-  apply mod_eq_Z2F_iff.
+  Section sub.
+    Context (n:nat)
+            (s:Z) (s_nz:s <> 0)
+            (c:list (Z * Z))
+            (m_nz:s - Associational.eval c <> 0)
+            (coef:Z).
 
-Ltac presolve_op_mod_eq wt x :=
-  transitivity (Positional.eval wt x); repeat autounfold;
-  [ cbv [mod_eq]; apply f_equal2; [|reflexivity];
-    apply f_equal
-  | autorewrite with uncps push_id push_basesystem_eval ].
+    Definition negate_snd (a:list Z) : list Z
+      := let A := to_associational n a in
+         let negA := Associational.negate_snd A in
+         from_associational n negA.
 
-Ltac solve_op_mod_eq wt x :=
-  presolve_op_mod_eq wt x;
-  [ basesystem_partial_evaluation_RHS;
-    do_replace_match_with_destructuring_match_in_goal
-  | reflexivity ].
+    Definition scmul (x:Z) (a:list Z) : list Z
+      := let A := to_associational n a in
+         let R := Associational.mul A [(1, x)] in
+         from_associational n R.
 
-Ltac solve_op_F wt x := F_mod_eq; solve_op_mod_eq wt x.
-Ltac presolve_op_F wt x := F_mod_eq; presolve_op_mod_eq wt x.
+    Definition balance : list Z
+      := scmul coef (encode n s c (s - Associational.eval c)).
+
+    Definition sub (a b:list Z) : list Z
+      := let ca := add n balance a in
+         let _b := negate_snd b in
+         add n ca _b.
+
+    Lemma eval_sub a b
+      : (forall i, In i (seq 0 n) -> weight (S i) / weight i <> 0) ->
+        (List.length a = n) -> (List.length b = n) ->
+        eval n (sub a b) mod (s - Associational.eval c)
+        = (eval n a - eval n b) mod (s - Associational.eval c).
+    Proof using s_nz m_nz weight_0 weight_nz.
+      destruct (zerop n); subst; try reflexivity.
+      intros; cbv [sub balance scmul negate_snd]; push; repeat distr_length;
+        eauto with omega.
+      push_Zmod; push; pull_Zmod; push_Zmod; pull_Zmod; distr_length; eauto.
+    Qed.
+    Hint Rewrite eval_sub : push_eval.
+    Lemma length_sub a b
+      : length a = n -> length b = n ->
+        length (sub a b) = n.
+    Proof using Type. intros; cbv [sub balance scmul negate_snd]; repeat distr_length. Qed.
+    Hint Rewrite length_sub : distr_length.
+    Definition opp (a:list Z) : list Z
+      := sub (zeros n) a.
+    Lemma eval_opp
+          (a:list Z)
+      : (length a = n) ->
+        (forall i, In i (seq 0 n) -> weight (S i) / weight i <> 0) ->
+        eval n (opp a) mod (s - Associational.eval c)
+        = (- eval n a) mod (s - Associational.eval c).
+    Proof using m_nz s_nz weight_0 weight_nz. intros; cbv [opp]; push; distr_length; auto.       Qed.
+    Lemma length_opp a
+      : length a = n -> length (opp a) = n.
+    Proof using Type. cbv [opp]; intros; repeat distr_length.            Qed.
+  End sub.
+  Hint Rewrite @eval_opp @eval_sub : push_eval.
+  Hint Rewrite @length_sub @length_opp : distr_length.
+
+  Section select.
+    Definition zselect (mask cond:Z) (p:list Z) :=
+      dlet t := Z.zselect cond 0 mask in List.map (Z.land t) p.
+
+    Definition select (cond:Z) (if_zero if_nonzero:list Z) :=
+      List.map (fun '(p, q) => Z.zselect cond p q) (List.combine if_zero if_nonzero).
+
+    Lemma map_and_0 n (p:list Z) : length p = n -> map (Z.land 0) p = zeros n.
+    Proof using Type.
+      intro; subst; induction p as [|x xs IHxs]; [reflexivity | ].
+      cbn; f_equal; auto.
+    Qed.
+    Lemma eval_zselect n mask cond p (H:List.map (Z.land mask) p = p) :
+      length p = n
+      -> eval n (zselect mask cond p) =
+         if dec (cond = 0) then 0 else eval n p.
+    Proof using Type.
+      cbv [zselect Let_In].
+      rewrite Z.zselect_correct; break_match.
+      { intros; erewrite map_and_0 by eassumption. apply eval_zeros. }
+      { rewrite H; reflexivity. }
+    Qed.
+    Lemma length_zselect mask cond p :
+      length (zselect mask cond p) = length p.
+    Proof using Type. clear dependent weight. cbv [zselect Let_In]; break_match; intros; distr_length. Qed.
+
+    (** We need an explicit equality proof here, because sometimes it
+        matters that we retain the same bounds when selecting.  The
+        alternative (weaker) lemma is [eval_select], where we only
+        talk about equality under [eval]. *)
+    Lemma select_eq cond n : forall p q,
+        length p = n -> length q = n ->
+        select cond p q = if dec (cond = 0) then p else q.
+    Proof using weight.
+      cbv [select]; induction n; intros;
+        destruct p; distr_length;
+          destruct q; distr_length;
+        repeat match goal with
+               | _ => progress autorewrite with push_combine push_map
+               | _ => rewrite IHn by distr_length
+               | _ => rewrite Z.zselect_correct
+               | _ => break_match; reflexivity
+               end.
+    Qed.
+    Lemma eval_select n cond p q :
+      length p = n -> length q = n
+      -> eval n (select cond p q) =
+         if dec (cond = 0) then eval n p else eval n q.
+    Proof using weight.
+      intros; erewrite select_eq by eauto.
+      break_match; reflexivity.
+    Qed.
+    Lemma length_select_min cond p q :
+      length (select cond p q) = Nat.min (length p) (length q).
+    Proof using Type. clear dependent weight. cbv [select Let_In]; distr_length. Qed.
+    Hint Rewrite length_select_min : distr_length.
+    Lemma length_select n cond p q :
+      length p = n -> length q = n ->
+      length (select cond p q) = n.
+    Proof using Type. clear dependent weight. distr_length; omega **. Qed.
+  End select.
+End Positional.
+(* Hint Rewrite disappears after the end of a section *)
+Hint Rewrite length_zeros length_add_to_nth length_from_associational @length_add @length_carry_reduce @length_carry @length_chained_carries @length_chained_carries_no_reduce @length_encode @length_encode_no_reduce @length_sub @length_opp @length_select @length_zselect @length_select_min @length_extend_to_length @length_drop_high_to_length : distr_length.
+Hint Rewrite @eval_zeros @eval_nil @eval_snoc_S @eval_select @eval_zselect @eval_extend_to_length using solve [auto; distr_length]: push_eval.
+Section Positional_nonuniform.
+  Context (weight weight' : nat -> Z).
+
+  Lemma eval_hd_tl n (xs:list Z) :
+    length xs = n ->
+    eval weight n xs = weight 0%nat * hd 0 xs + eval (fun i => weight (S i)) (pred n) (tl xs).
+  Proof using Type.
+    intro; subst; destruct xs as [|x xs]; [ cbn; omega | ].
+    cbv [eval to_associational Associational.eval] in *; cbn.
+    rewrite <- map_S_seq; reflexivity.
+  Qed.
+
+  Lemma eval_cons n (x:Z) (xs:list Z) :
+    length xs = n ->
+    eval weight (S n) (x::xs) = weight 0%nat * x + eval (fun i => weight (S i)) n xs.
+  Proof using Type. intro; subst; apply eval_hd_tl; reflexivity. Qed.
+
+  Lemma eval_weight_mul n p k :
+    (forall i, In i (seq 0 n) -> weight i = k * weight' i) ->
+    eval weight n p = k * eval weight' n p.
+  Proof using Type.
+    setoid_rewrite List.in_seq.
+    revert n weight weight'; induction p as [|x xs IHxs], n as [|n]; intros weight weight' Hwt;
+      cbv [eval to_associational Associational.eval] in *; cbn in *; try omega.
+    rewrite Hwt, Z.mul_add_distr_l, Z.mul_assoc by omega.
+    erewrite <- !map_S_seq, IHxs; [ reflexivity | ]; cbn; eauto with omega.
+  Qed.
+End Positional_nonuniform.
+End Positional.
+
+Record weight_properties {weight : nat -> Z} :=
+  {
+    weight_0 : weight 0%nat = 1;
+    weight_positive : forall i, 0 < weight i;
+    weight_multiples : forall i, weight (S i) mod weight i = 0;
+    weight_divides : forall i : nat, 0 < weight (S i) / weight i;
+  }.
+Hint Resolve weight_0 weight_positive weight_multiples weight_divides : core.

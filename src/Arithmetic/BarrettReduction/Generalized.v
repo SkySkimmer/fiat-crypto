@@ -9,7 +9,15 @@
     base ([b]), exponent ([k]), and the [offset] than those given in
     the HAC. *)
 Require Import Coq.ZArith.ZArith Coq.micromega.Psatz.
-Require Import Crypto.Util.ZUtil Crypto.Util.Tactics.BreakMatch.
+Require Import Crypto.Util.ZUtil.Div.
+Require Import Crypto.Util.ZUtil.Modulo.
+Require Import Crypto.Util.ZUtil.Pow.
+Require Import Crypto.Util.ZUtil.Tactics.ZeroBounds.
+Require Import Crypto.Util.ZUtil.Tactics.SimplifyFractionsLe.
+Require Import Crypto.Util.ZUtil.Tactics.LtbToLt.
+Require Import Crypto.Util.ZUtil.Tactics.DivModToQuotRem.
+Require Import Crypto.Util.ZUtil.ZSimplify.
+Require Import Crypto.Util.Tactics.BreakMatch.
 
 Local Open Scope Z_scope.
 
@@ -94,17 +102,17 @@ Section barrett.
       : q * n <= a.
     Proof using a_nonneg a_small base_good k_big_enough m_good n_pos n_reasonable offset_nonneg.
       subst q r m.
-      assert (0 < b^(k-offset)). zero_bounds.
-      assert (0 < b^(k+offset)) by zero_bounds.
-      assert (0 < b^(2 * k)) by zero_bounds.
+      assert (0 < b^(k-offset)). Z.zero_bounds.
+      assert (0 < b^(k+offset)) by Z.zero_bounds.
+      assert (0 < b^(2 * k)) by Z.zero_bounds.
       Z.simplify_fractions_le.
       autorewrite with pull_Zpow pull_Zdiv zsimplify; reflexivity.
     Qed.
 
     Lemma q_nice : { b : bool * bool | q = a / n + (if fst b then -1 else 0) + (if snd b then -1 else 0) }.
     Proof using a_nonneg a_small base_good k_big_enough m_good n_large n_pos n_reasonable offset_nonneg.
-      assert (0 < b^(k+offset)) by zero_bounds.
-      assert (0 < b^(k-offset)) by zero_bounds.
+      assert (0 < b^(k+offset)) by Z.zero_bounds.
+      assert (0 < b^(k-offset)) by Z.zero_bounds.
       assert (a / b^(k-offset) <= b^(2*k) / b^(k-offset)) by auto with zarith lia.
       assert (a / b^(k-offset) <= b^(k+offset)) by (autorewrite with pull_Zpow zsimplify in *; assumption).
       subst q r m.
@@ -145,8 +153,8 @@ Section barrett.
         pose proof (Z.mod_pos_bound (b ^ (2*k)) n).
         assert (0 < b ^ (k - offset)) by auto with zarith.
         assert (a/n < b ^ k) by auto using Z.div_lt_upper_bound with zarith.
-        assert (b ^ (2 * k) - m * n = b ^ (2 * k) mod n) by (subst m; Z.div_mod_to_quot_rem; nia).
-        autorewrite with push_Zpow in *; Z.div_mod_to_quot_rem; nia.
+        assert (b ^ (2 * k) - m * n = b ^ (2 * k) mod n) by (subst m; Z.div_mod_to_quot_rem_in_goal; nia).
+        autorewrite with push_Zpow in *; Z.div_mod_to_quot_rem_in_goal; nia.
       Qed.
 
       Lemma helper_2 : n * (a / n) - b ^ (k - offset) < b ^ (k - offset) * (a / b ^ (k - offset)).
@@ -154,7 +162,7 @@ Section barrett.
         pose proof (Z.mod_pos_bound a n).
         pose proof (Z.mod_pos_bound a (b ^ (k - offset))).
         assert (0 < b ^ (k - offset)) by auto with zarith.
-        Z.div_mod_to_quot_rem; lia.
+        Z.div_mod_to_quot_rem_in_goal; lia.
       Qed.
 
       Let epsilon := (a / n) * b ^ (k+offset) - (a / b ^ (k - offset)) * m.
@@ -162,7 +170,7 @@ Section barrett.
       Lemma q_epsilon : q = (a / n) + (- epsilon) / b ^ (k + offset).
       Proof.
         subst q epsilon.
-        autorewrite with push_Zpow in *; do 2 Z.div_mod_to_quot_rem; nia.
+        autorewrite with push_Zpow in *; do 2 Z.div_mod_to_quot_rem_in_goal; nia.
       Qed.
 
       Lemma epsilon_lower : - b ^ (k + offset) < epsilon.
@@ -170,7 +178,7 @@ Section barrett.
         pose proof q_epsilon as Hq_epsilon.
         rewrite (proj2_sig q_nice) in Hq_epsilon.
         cut (- epsilon / b ^ (k + offset) <= 0);
-          [ Z.div_mod_to_quot_rem | break_match_hyps ]; nia.
+          [ Z.div_mod_to_quot_rem_in_goal | break_match_hyps ]; nia.
       Qed.
 
       Lemma m_pos : 0 < m.
@@ -192,7 +200,7 @@ Section barrett.
         exists (0 <? epsilon).
         rewrite q_epsilon.
         pose proof epsilon_bound. pose proof epsilon_lower.
-        break_match; Z.ltb_to_lt; Z.div_mod_to_quot_rem; nia.
+        break_match; Z.ltb_to_lt; Z.div_mod_to_quot_rem_in_goal; nia.
       Qed.
 
       Lemma q_bound : a / n - 1 <= q.
@@ -209,6 +217,15 @@ Section barrett.
         apply Z.le_lt_trans with (m:= a - (a / n - 1) * n); [pose proof q_bound; nia | ].
         autorewrite with push_Zmul zsimplify zstrip_div.
         auto with lia.
+      Qed.
+
+      Theorem barrett_reduction_small_strong
+        : a mod n = if r <? n then r else r-n.
+      Proof using a a_good a_nonneg a_small b base_good epsilon k k_big_enough k_good m m_good n n_good n_large n_pos n_reasonable offset offset_nonneg q r.
+        pose proof r_small_strong. pose proof qn_small.
+        destruct (r <? n) eqn:Hr; try rewrite Hr; Z.ltb_to_lt; try lia.
+        { symmetry; apply (Zmod_unique a n q); subst r; lia. }
+        { symmetry; apply (Zmod_unique a n (q + 1)); subst r; lia. }
       Qed.
     End StrongerBounds.
   End barrett_algorithm.

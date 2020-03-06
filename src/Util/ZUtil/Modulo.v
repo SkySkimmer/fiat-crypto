@@ -4,6 +4,8 @@ Require Import Crypto.Util.ZUtil.ZSimplify.Core.
 Require Import Crypto.Util.ZUtil.Tactics.DivModToQuotRem.
 Require Import Crypto.Util.ZUtil.Tactics.LtbToLt.
 Require Import Crypto.Util.ZUtil.Tactics.ReplaceNegWithPos.
+Require Import Crypto.Util.ZUtil.Tactics.PullPush.Modulo.
+Require Import Crypto.Util.ZUtil.Div.
 Require Import Crypto.Util.Tactics.BreakMatch.
 Require Import Crypto.Util.Tactics.DestructHead.
 Local Open Scope Z_scope.
@@ -159,7 +161,7 @@ Module Z.
            + if c <? 0 then - X ((a / b) mod c) (a mod (c * b)) ((a mod (c * b)) / b) a b c (a / b) else 0.
   Proof.
     intros; break_match; Z.ltb_to_lt; rewrite ?Z.sub_0_r, ?Z.add_0_r;
-      assert (0 <> c * b) by nia; Z.div_mod_to_quot_rem; subst;
+      assert (0 <> c * b) by nia; Z.div_mod_to_quot_rem_in_goal; subst;
         destruct_head'_or; destruct_head'_and;
           try assert (b < 0) by omega;
           try assert (c < 0) by omega;
@@ -225,33 +227,6 @@ Module Z.
   Lemma small_mod_eq a b n: a mod n = b mod n -> 0 <= a < n -> a = b mod n.
   Proof. intros; rewrite <-(Z.mod_small a n); auto. Qed.
 
-  Lemma mod_pow_full p q n : (p^q) mod n = ((p mod n)^q) mod n.
-  Proof.
-    destruct (Z_dec' n 0) as [ [H|H] | H]; subst;
-      [
-      | apply Zpower_mod; assumption
-      | rewrite !Zmod_0_r; reflexivity ].
-    { revert H.
-      rewrite <- (Z.opp_involutive (p^q)),
-      <- (Z.opp_involutive ((p mod n)^q)),
-      <- (Z.opp_involutive p),
-      <- (Z.opp_involutive n).
-      generalize (-n); clear n; intros n H.
-      rewrite !Zmod_opp_opp.
-      rewrite !Z.opp_involutive.
-      apply f_equal.
-      destruct (Z.Even_or_Odd q).
-      { rewrite !Z.pow_opp_even by (assumption || omega).
-        destruct (Z.eq_dec (p^q mod n) 0) as [H'|H'], (Z.eq_dec ((-p mod n)^q mod n) 0) as [H''|H''];
-          repeat first [ rewrite Z_mod_zero_opp_full by assumption
-                       | rewrite Z_mod_nz_opp_full by assumption
-                       | reflexivity
-                       | rewrite <- Zpower_mod, Z.pow_opp_even in H'' by (assumption || omega); omega
-                       | rewrite <- Zpower_mod, Z.pow_opp_even in H'' |- * by (assumption || omega); omega ]. }
-      { rewrite Z.pow_opp_odd, !Z.opp_involutive, <- Zpower_mod, Z.pow_opp_odd, ?Z.opp_involutive by (assumption || omega).
-        reflexivity. } }
-  Qed.
-
   Lemma mod_bound_min_max l x u d (H : l <= x <= u)
     : (if l / d =? u / d then Z.min (l mod d) (u mod d) else Z.min 0 (d + 1))
       <= x mod d
@@ -259,7 +234,7 @@ Module Z.
   Proof.
     destruct (Z_dec d 0) as [ [?|?] | ? ];
       try solve [ subst; autorewrite with zsimplify; simpl; split; reflexivity
-                | repeat first [ progress Z.div_mod_to_quot_rem
+                | repeat first [ progress Z.div_mod_to_quot_rem_in_goal
                                | progress subst
                                | progress break_innermost_match
                                | progress Z.ltb_to_lt
@@ -277,5 +252,132 @@ Module Z.
                                  | [ H : ?d * ?q0 + ?r0 <= ?d * ?q1 + ?r1 |- _ ]
                                    => assert (q0 = q1) by nia; subst q0
                                  end ] ].
+  Qed.
+
+  Lemma mod_mod_0_0_eq x y : x mod y = 0 -> y mod x = 0 -> x = y \/ x = - y \/ x = 0 \/ y = 0.
+  Proof.
+    destruct (Z_zerop x), (Z_zerop y); eauto.
+    Z.div_mod_to_quot_rem_in_goal; subst.
+    rewrite ?Z.add_0_r in *.
+    match goal with
+    | [ H : ?x = ?x * ?q * ?q' |- _ ]
+      => assert (q * q' = 1) by nia;
+          destruct_head'_or;
+          first [ assert (q < 0) by nia
+                | assert (0 < q) by nia ];
+          first [ assert (q' < 0) by nia
+                | assert (0 < q') by nia ]
+    end;
+      nia.
+  Qed.
+  Lemma mod_mod_0_0_eq_pos x y : 0 < x -> 0 < y -> x mod y = 0 -> y mod x = 0 -> x = y.
+  Proof. intros ?? H0 H1; pose proof (mod_mod_0_0_eq x y H0 H1); omega. Qed.
+  Lemma mod_mod_trans x y z : y <> 0 -> x mod y = 0 -> y mod z = 0 -> x mod z = 0.
+  Proof.
+    destruct (Z_zerop x), (Z_zerop z); subst; autorewrite with zsimplify_const; auto; intro.
+    Z.generalize_div_eucl x y.
+    Z.generalize_div_eucl y z.
+    intros; subst.
+    rewrite ?Z.add_0_r in *.
+    rewrite <- Z.mul_assoc.
+    rewrite <- Zmult_mod_idemp_l, Z_mod_same_full.
+    autorewrite with zsimplify_const.
+    reflexivity.
+  Qed.
+
+  Lemma mod_opp_r a b : a mod (-b) = -((-a) mod b).
+  Proof. pose proof (Z.div_opp_r a b); Z.div_mod_to_quot_rem; nia. Qed.
+  Hint Resolve mod_opp_r : zarith.
+
+  Lemma mod_same_pow : forall a b c, 0 <= c <= b -> a ^ b mod a ^ c = 0.
+  Proof.
+    intros a b c H.
+    replace b with (b - c + c) by ring.
+    rewrite Z.pow_add_r by omega.
+    apply Z_mod_mult.
+  Qed.
+  Hint Rewrite mod_same_pow using zutil_arith : zsimplify.
+  Hint Resolve mod_same_pow : zarith.
+
+  Lemma mod_opp_l_z_iff a b (H : b <> 0) : a mod b = 0 <-> (-a) mod b = 0.
+  Proof.
+    split; intro H'; apply Z.mod_opp_l_z in H'; rewrite ?Z.opp_involutive in H'; assumption.
+  Qed.
+  Hint Rewrite <- mod_opp_l_z_iff using zutil_arith : zsimplify.
+
+  Lemma mod_small_sym a b : 0 <= a < b -> a = a mod b.
+  Proof. intros; symmetry; apply Z.mod_small; assumption. Qed.
+  Hint Resolve mod_small_sym : zarith.
+
+  Lemma mod_eq_le_to_eq a b : 0 < a <= b -> a mod b = 0 -> a = b.
+  Proof. pose proof (Z.mod_eq_le_div_1 a b); intros; Z.div_mod_to_quot_rem; nia. Qed.
+  Hint Resolve mod_eq_le_to_eq : zarith.
+
+  Lemma mod_neq_0_le_to_neq a b : a mod b <> 0 -> a <> b.
+  Proof. repeat intro; subst; autorewrite with zsimplify in *; lia. Qed.
+  Hint Resolve mod_neq_0_le_to_neq : zarith.
+
+  Lemma div_mod' a b : b <> 0 -> a = (a / b) * b + a mod b.
+  Proof. intro; etransitivity; [ apply (Z.div_mod a b); assumption | lia ]. Qed.
+  Hint Rewrite <- div_mod' using zutil_arith : zsimplify.
+
+  Lemma div_mod'' a b : b <> 0 -> a = a mod b + b * (a / b).
+  Proof. intro; etransitivity; [ apply (Z.div_mod a b); assumption | lia ]. Qed.
+  Hint Rewrite <- div_mod'' using zutil_arith : zsimplify.
+
+  Lemma div_mod''' a b : b <> 0 -> a = a mod b + (a / b) * b.
+  Proof. intro; etransitivity; [ apply (Z.div_mod a b); assumption | lia ]. Qed.
+  Hint Rewrite <- div_mod''' using zutil_arith : zsimplify.
+
+  Lemma sub_mod_mod_0 x d : (x - x mod d) mod d = 0.
+  Proof.
+    destruct (Z_zerop d); subst; push_Zmod; autorewrite with zsimplify; reflexivity.
+  Qed.
+  Hint Resolve sub_mod_mod_0 : zarith.
+  Hint Rewrite sub_mod_mod_0 : zsimplify.
+
+  Lemma mod_small_n n a b : 0 <= n -> b <> 0 -> n * b <= a < (1 + n) * b -> a mod b = a - n * b.
+  Proof. intros; erewrite Zmod_eq_full, Z.div_between by eassumption. reflexivity. Qed.
+  Hint Rewrite mod_small_n using zutil_arith : zsimplify.
+
+  Lemma mod_small_1 a b : b <> 0 -> b <= a < 2 * b -> a mod b = a - b.
+  Proof. intros; rewrite (mod_small_n 1) by lia; lia. Qed.
+  Hint Rewrite mod_small_1 using zutil_arith : zsimplify.
+
+  Lemma mod_small_n_if n a b : 0 <= n -> b <> 0 -> n * b <= a < (2 + n) * b -> a mod b = a - (if (1 + n) * b <=? a then (1 + n) else n) * b.
+  Proof. intros; erewrite Zmod_eq_full, Z.div_between_if by eassumption; autorewrite with zsimplify_const. reflexivity. Qed.
+
+  Lemma mod_small_0_if a b : b <> 0 -> 0 <= a < 2 * b -> a mod b = a - if b <=? a then b else 0.
+  Proof. intros; rewrite (mod_small_n_if 0) by lia; autorewrite with zsimplify_const. break_match; lia. Qed.
+
+  Lemma mul_mod_distr_r_full a b c : (a * c) mod (b * c) = (a mod b * c).
+  Proof.
+    destruct (Z_zerop b); [ | destruct (Z_zerop c) ]; subst;
+      autorewrite with zsimplify; auto using Z.mul_mod_distr_r.
+  Qed.
+
+  Lemma mul_mod_distr_l_full a b c : (c * a) mod (c * b) = c * (a mod b).
+  Proof.
+    destruct (Z_zerop b); [ | destruct (Z_zerop c) ]; subst;
+      autorewrite with zsimplify; auto using Z.mul_mod_distr_l.
+  Qed.
+
+  Lemma lt_mul_2_mod_sub : forall a b, b <> 0 -> b <= a < 2 * b -> a mod b = a - b.
+  Proof.
+    intros a b H H0.
+    replace (a mod b) with ((1 * b + (a - b)) mod b) by (f_equal; ring).
+    rewrite Z.mod_add_l by auto.
+    apply Z.mod_small.
+    omega.
+  Qed.
+
+  Lemma mod_pow_r_split x b e1 e2 : 0 <= b -> 0 <= e1 <= e2 -> x mod b^e2 = (x mod b^e1) + (b^e1) * ((x / b^e1) mod b^(e2-e1)).
+  Proof.
+    destruct (Z_zerop b).
+    { destruct (Z_zerop e1), (Z_zerop e2), (Z.eq_dec e1 e2); subst; intros; cbn; autorewrite with zsimplify_fast; lia. }
+    intros.
+    replace (b^e2) with (b^e1 * b^(e2 - e1)) by (autorewrite with pull_Zpow; f_equal; lia).
+    rewrite Z.rem_mul_r by auto with zarith.
+    reflexivity.
   Qed.
 End Z.

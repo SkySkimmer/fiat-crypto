@@ -1,0 +1,24 @@
+name: Test Generated C
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '0 0 1 * *'
+
+jobs:
+  test-c:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: submodules-init
+      uses: snickerbockers/submodules-init@v4
+    - name: install gcc
+      run: |
+        sudo apt-get update -q
+        sudo apt-get install g++-7 libssl-dev -y --allow-unauthenticated
+        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-7 60 --slave /usr/bin/g++ g++ /usr/bin/g++-7
+    - name: make only-test-c-files CC=gcc
+      run: make only-test-c-files CC=gcc EXTERNAL_DEPENDENCIES=1

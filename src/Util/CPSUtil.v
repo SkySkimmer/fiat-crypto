@@ -174,6 +174,16 @@ Lemma map_cps_correct {A B} g ls: forall {T} f,
 Proof. induction ls as [|?? IHls]; simpl; intros; rewrite ?IHls; reflexivity. Qed.
 Hint Rewrite @map_cps_correct : uncps.
 
+Fixpoint map_cps2 {A B} (g : A->forall T, (B -> T) -> T) ls
+         {T} (f:list B->T) : T:=
+  match ls with
+  | nil => f nil
+  | a :: t => map_cps2 g t (fun r => g a _ (fun ga => f (ga :: r)))
+  end.
+Lemma map_cps2_correct {A B} g g' (Hg : forall T k a, g a T k = k (g' a)) ls : forall {T} f,
+    @map_cps2 A B g ls T f = f (map g' ls).
+Proof. induction ls as [|?? IHls]; simpl; intros; rewrite ?IHls, ?Hg; reflexivity. Qed.
+
 Fixpoint firstn_cps {A} (n:nat) (l:list A) {T} (f:list A->T) :=
   match n with
   | O => f nil
@@ -325,6 +335,7 @@ Qed.
 Hint Rewrite @combine_cps_correct: uncps.
 
 (* differs from fold_right_cps in that the functional argument `g` is also a CPS function *)
+Local Set Universe Polymorphism.
 Definition fold_right_cps2_specialized_step
            (fold_right_cps2_specialized
             : forall {T A B} (g : B -> A -> (A->T)->T) (a0 : A) (l : list B) (f : A -> T), _)
@@ -337,6 +348,7 @@ Fixpoint fold_right_cps2_specialized {T A B} (g : B -> A -> (A->T)->T) (a0 : A) 
   @fold_right_cps2_specialized_step (@fold_right_cps2_specialized) T A B g a0 l f.
 Definition fold_right_cps2 {A B} (g : B -> A -> forall {T}, (A->T)->T) (a0 : A) (l : list B) {T} (f : A -> T) :=
   @fold_right_cps2_specialized T A B (fun b a => @g b a T) a0 l f.
+Local Unset Universe Polymorphism.
 Lemma unfold_fold_right_cps2 {A B} (g : B -> A -> forall {T}, (A->T)->T) (a0 : A) (l : list B) {T} (f : A -> T)
   : @fold_right_cps2 A B g a0 l T f
     = match l with
@@ -450,7 +462,7 @@ Module Tuple.
   Definition mapi_with'_cps {T A B n} i
           (f: nat->T->A->forall {R}, (T*B->R)->R) (start:T)
     : Tuple.tuple' A n -> forall {R}, (T * tuple' B n -> R) -> R
-    := fun ts R => @mapi_with'_cps_specialized R T A B (fun n t a => @f n t a R) n i start ts.
+    := fun ts {R} => @mapi_with'_cps_specialized R T A B (fun n t a => @f n t a R) n i start ts.
 
   Definition mapi_with_cps {S A B n}
           (f: nat->S->A->forall {T}, (S*B->T)->T) (start:S) (ys:tuple A n) {T}
@@ -503,7 +515,7 @@ Module Tuple.
   Definition mapi_with'_cps2 {T A B n} i
           (f: nat->T->A->forall {R}, (T*B->R)->R) (start:T)
     : Tuple.tuple' A n -> forall {R}, (T * tuple' B n -> R) -> R
-    := fun ts R => @mapi_with'_cps2_specialized R T A B (fun n t a => @f n t a R) n i start ts.
+    := fun ts {R} => @mapi_with'_cps2_specialized R T A B (fun n t a => @f n t a R) n i start ts.
 
   Definition mapi_with_cps2 {S A B n}
           (f: nat->S->A->forall {T}, (S*B->T)->T) (start:S) (ys:tuple A n) {T}
